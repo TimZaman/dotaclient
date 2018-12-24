@@ -1,0 +1,15 @@
+.DS_Store
+*.code-workspace
+*.h5
+*.mov
+*.pyc
+*.so
+*.pt
+*egg-info
+*passwords*
+build
+dist
+resources
+runs
+screenshots
+third_party

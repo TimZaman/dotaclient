@@ -1,0 +1,20 @@
+syntax = "proto2";
+
+message Empty2 {
+}
+
+message Weights {
+  optional bytes data = 1;
+}
+
+message RolloutData {
+  optional string game_id = 1;
+  optional bytes actions = 2; // Pickled chosen actions
+  optional bytes states = 3; // Pickled rewards
+  optional bytes rewards = 4; // Pickled rewards
+}
+
+service DotaOptimizer {
+  rpc Rollout(RolloutData) returns (Empty2) {}
+  rpc GetWeights (Empty2) returns (Weights) {}
+}
