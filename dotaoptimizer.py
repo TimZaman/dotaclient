@@ -34,17 +34,15 @@ MIN_BATCH_SIZE = 4
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
 
-
-
-START_EPISODE = 31
+START_EPISODE = 969
 USE_CHECKPOINTS = True
 MODEL_FILENAME_FMT = "model_%09d.pt"
 
-# PRETRAINED_MODEL = None
-PRETRAINED_MODEL = 'runs/Dec24_15-44-04_Tims-MacBook-Pro.local/' + MODEL_FILENAME_FMT % START_EPISODE
-model_blob = bucket.get_blob(PRETRAINED_MODEL)
-PRETRAINED_MODEL = '/tmp/mdl.pt'
-model_blob.download_to_filename(PRETRAINED_MODEL)
+PRETRAINED_MODEL = None
+# PRETRAINED_MODEL = 'runs/Dec26_22-48-12_Tims-MacBook-Pro.local/' + MODEL_FILENAME_FMT % START_EPISODE
+# model_blob = bucket.get_blob(PRETRAINED_MODEL)
+# PRETRAINED_MODEL = '/tmp/mdl.pt'
+# model_blob.download_to_filename(PRETRAINED_MODEL)
 
 
 
@@ -131,7 +129,7 @@ class DotaOptimizer(DotaOptimizerBase):
         return log_prob_sum
 
     async def step(self):
-        print('::step')
+        logger.info('::step')
         # Get item form queue
         all_reward_sums = []
         all_discounted_rewards = []
@@ -150,7 +148,7 @@ class DotaOptimizer(DotaOptimizerBase):
             all_rewards.append(experience.rewards)
             reward_sums = [sum(r.values()) for r in experience.rewards]
             discounted_rewards = self.discount_rewards(reward_sums)
-            
+
             all_reward_sums.append(sum(reward_sums))
 
             all_discounted_rewards.extend(discounted_rewards)
@@ -164,8 +162,8 @@ class DotaOptimizer(DotaOptimizerBase):
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
-        print('loss=', loss)
-        print('steps_per_s=', steps_per_s)
+        logger.info('loss={}'.format(loss))
+        logger.info('steps_per_s={}'.format(steps_per_s))
 
         reward_counter = Counter()
         for b in all_rewards: # Jobs in a batch.
@@ -176,7 +174,7 @@ class DotaOptimizer(DotaOptimizerBase):
         reward_sum = sum(reward_counter.values())
         mean_reward = reward_sum / batch_size
 
-        print('mean_reward=', mean_reward)
+        logger.info('mean_reward={}'.format(mean_reward))
 
         if USE_CHECKPOINTS:
             # TODO(tzaman): should we write a model snapshot at episode 0?
@@ -197,7 +195,7 @@ class DotaOptimizer(DotaOptimizerBase):
             blob.upload_from_filename(filename=self.events_filename)  # Events file
 
         self.episode += 1
-        
+
 
     async def Rollout(self, stream):
         # print('::Rollout')
@@ -226,9 +224,9 @@ class DotaOptimizer(DotaOptimizerBase):
         await stream.send_message(Weights(data=state_dict_p))
 
 
-async def serve(server, *, host='127.0.0.1', port=50051):
+async def serve(server, host, port):
+    logger.info('Serving on {}:{}'.format(host, port))
     await server.start(host, port)
-    print('Serving on {}:{}'.format(host, port))
     try:
         await server.wait_closed()
     except asyncio.CancelledError:
@@ -238,7 +236,7 @@ async def serve(server, *, host='127.0.0.1', port=50051):
 
 async def main():
     server = Server([DotaOptimizer()], loop=asyncio.get_event_loop())
-    await serve(server)
+    await serve(server, host='', port=50051)
 
 
 if __name__ == '__main__':

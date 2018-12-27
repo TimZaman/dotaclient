@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Service  # my-optimizer.default.svc.cluster.local
+metadata:
+  name: my-optimizer
+  namespace: default
+  labels:
+    run: my-optimizer
+spec:
+  type: ClusterIP
+  ports:
+  - name: grpc
+    port: 50051
+    targetPort: 50051
+  selector:
+    run: my-optimizer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-optimizer
+spec:
+  selector:
+    matchLabels:
+      run: my-optimizer
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        run: my-optimizer
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-preemptible
+                operator: DoesNotExist
+      volumes:
+      - name: gcs-secret
+        secret:
+          secretName: gcs-admin-secret
+          items:
+          - key: sa_json
+            path: sa_credentials.json
+      containers:
+      - name: optimizer
+        image: gcr.io/dotaservice-225201/dotaclient:latest
+        command: ["python3.7", "dotaoptimizer.py"]
+        volumeMounts:
+        - name: gcs-secret
+          mountPath: /etc/gcp
+          readOnly: true
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /etc/gcp/sa_credentials.json
+        ports:
+        - name: grpc
+          containerPort: 50051
+        resources:
+          requests:
+            cpu: 300m  # ~80m per dotaservice
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dotaservice-deployment
+  labels:
+    app: dotaservice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dotaservice
+  template:
+    metadata:
+      labels:
+        app: dotaservice
+    spec:
+      containers:
+      - name: client
+        image: gcr.io/dotaservice-225201/dotaclient:latest
+        command:
+        - python3.7
+        - client.py
+        - --ip
+        - my-optimizer.default.svc.cluster.local
+        resources:
+          requests:
+            cpu: 50m
+      - name: dotaservice
+        image: gcr.io/dotaservice-225201/dotaservice:0.2.0
+        ports:
+        - containerPort: 13337
+        resources:
+          requests:
+            cpu: 350m

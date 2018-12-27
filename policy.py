@@ -36,7 +36,10 @@ class Policy(nn.Module):
         self.affine_unit_anh1 = nn.Linear(3, 32)
         self.affine_unit_anh2 = nn.Linear(32, 128)
 
-        self.affine_pre_rnn = nn.Linear(128*4, 128)
+        self.affine_unit_h1 = nn.Linear(3, 32)
+        self.affine_unit_h2 = nn.Linear(32, 128)
+
+        self.affine_pre_rnn = nn.Linear(128*5, 128)
 
         self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1)
         self.ln = nn.LayerNorm(128)
@@ -61,7 +64,7 @@ class Policy(nn.Module):
         for name, param in self.named_parameters():
             param.grad = grad_dict[name]
 
-    def forward(self, loc, env, enemy_nonheroes, allied_nonheroes, hidden):
+    def forward(self, loc, env, enemy_nonheroes, allied_nonheroes, enemy_heroes, hidden):
         logger.debug('policy(inputs=\n{}'.format(
             pformat({'loc': loc, 'env': env, 'enemy_nonheroes': enemy_nonheroes,
             'allied_nonheroes': allied_nonheroes})))
@@ -104,11 +107,26 @@ class Policy(nn.Module):
         else:
             anh_embedding_max = torch.zeros(1, 128)
 
-        # Combine for LSTM.
-        x = torch.cat((loc, env, enh_embedding_max, anh_embedding_max), 1)  # (512,)
 
-        # Add some internal noise
-        x = F.dropout(x, p=0.3, training=self.training)
+        h_embedding = []
+        for unit_m in enemy_heroes:
+            h1 = F.relu(self.affine_unit_h1(unit_m))
+            h2 = self.affine_unit_h2(h1)
+            h_embedding.append(h2)
+
+        if h_embedding:
+            # Create the variable length embedding for use in LSTM and attention head.
+            h_embedding = torch.stack(h_embedding)  # shape: (n_units, 128)
+            # We max over unit dim to have a fixed output shape bc the LSTM needs to learn about these units.
+            h_embedding_max, _ = torch.max(h_embedding, dim=0)  # shape: (128,)
+            h_embedding_max = h_embedding_max.unsqueeze(0)
+            unit_embedding = torch.cat((unit_embedding, h_embedding), 0)  # (n, 128)
+        else:
+            h_embedding_max = torch.zeros(1, 128)
+
+
+        # Combine for LSTM.
+        x = torch.cat((loc, env, enh_embedding_max, anh_embedding_max, h_embedding_max), 1)  # (512,)
 
         x = F.relu(self.affine_pre_rnn(x))
 

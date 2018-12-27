@@ -1,5 +1,6 @@
 from collections import Counter
 from pprint import pprint, pformat
+import argparse
 import asyncio
 import logging
 import math
@@ -16,6 +17,8 @@ from dotaservice.protos.DotaService_pb2 import Config
 from dotaservice.protos.DotaService_pb2 import Empty
 from dotaservice.protos.DotaService_pb2 import HostMode
 from dotaservice.protos.DotaService_pb2 import Status
+from dotaservice.protos.DotaService_pb2 import Init
+from dotaservice.protos.DotaService_pb2 import Team
 from grpclib.client import Channel
 from torch.distributions import Categorical
 import numpy as np
@@ -40,12 +43,10 @@ torch.manual_seed(7)
 
 
 # Static variables
-TEAM_ID_RADIANT = 2
-TEAM_ID_DIRE = 3
-OPPOSITE_TEAM = {TEAM_ID_DIRE: TEAM_ID_RADIANT, TEAM_ID_RADIANT: TEAM_ID_DIRE}
+OPPOSITE_TEAM = {Team.Value('DIRE'): Team.Value('RADIANT'), Team.Value('RADIANT'): Team.Value('DIRE')}
 
 # Variables
-N_STEPS = 300
+N_STEPS = 350
 
 TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
@@ -105,9 +106,12 @@ def get_total_xp(level, xp_needed_to_level):
 
 def get_reward(prev_obs, obs, player_id):
     """Get the reward."""
-    unit_init = get_hero_unit(prev_obs, player_id=player_id)
-    unit = get_hero_unit(obs, player_id=player_id)
-    reward = {'xp': 0, 'hp': 0, 'death': 0, 'lh': 0, 'denies': 0}
+    unit_init = get_unit(prev_obs, player_id=player_id)
+    unit = get_unit(obs, player_id=player_id)
+    player_init = get_player(prev_obs, player_id=player_id)
+    player = get_player(obs, player_id=player_id)
+
+    reward = {}
 
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
@@ -120,8 +124,12 @@ def get_reward(prev_obs, obs, player_id):
         hp_rel = unit.health / unit.health_max
         low_hp_factor = 1. + (1 - hp_rel) ** 2  # hp_rel=0 -> 2; hp_rel=0.5->1.25; hp_rel=1 -> 1.
         reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor
-    if unit_init.is_alive and not unit.is_alive:
-        reward['death'] = - 0.5  # Death should be a big penalty
+    else:
+        reward['hp'] = 0
+
+    # Kill and death rewards
+    reward['kills'] = (player.kills - player_init.kills) * 0.5
+    reward['death'] = (player.deaths - player_init.deaths) * - 0.5
 
     # Last-hit reward
     lh = unit.last_hits - unit_init.last_hits
@@ -138,8 +146,13 @@ policy = Policy()
 optimizer = optim.SGD(policy.parameters(), lr=LEARNING_RATE)
 
 
+def get_player(state, player_id):
+    for player in state.players:
+        if player.player_id == player_id:
+            return player
+    raise ValueError("hero {} not found in state:\n{}".format(player_id, state))
 
-def get_hero_unit(state, player_id):
+def get_unit(state, player_id):
     for unit in state.units:
         if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO') \
             and unit.player_id == player_id:
@@ -147,130 +160,20 @@ def get_hero_unit(state, player_id):
     raise ValueError("hero {} not found in state:\n{}".format(player_id, state))
 
 
-class Actor:
+class Player:
 
-    ENV_RETRY_DELAY = 5
-    EXCEPTION_RETRIES = 5
-
-    def __init__(self, config, host=DOTASERVICE_HOST, port=DOTASERVICE_PORT, name=''):
-        self.host = host
-        self.port = port
-        self.config = config
-        self.name = name
-        self.log_prefix = 'Actor {}: '.format(self.name)
-        self.env = None
-        self.channel = None
-
-    def connect(self):
-        if self.channel is None:  # TODO(tzaman) OR channel is closed? How?
-            # Set up a channel.
-            self.channel = Channel(self.host, self.port, loop=asyncio.get_event_loop())
-            self.env = DotaServiceStub(self.channel)
-            logger.info(self.log_prefix + 'Channel opened.')
-
-    def disconnect(self):
-        if self.channel is not None:
-            self.channel.close()
-            self.channel = None
-            self.env = None
-            logger.info(self.log_prefix + 'Channel closed.')
-
-    async def __call__(self):
-        # When an actor is being called it should first open up a channel. When a channel is opened
-        # it makes sense to try to re-use it for this actor. So if a channel has already been
-        # opened we should try to reuse.
-
-        for i in range(self.EXCEPTION_RETRIES):
-            try:
-                while True:
-                    self.connect()
-
-                    # Wait for game to boot.
-                    response = await asyncio.wait_for(self.env.reset(self.config), timeout=90)
-                    initial_obs = response.world_state
-
-                    if response.status == Status.Value('OK'):
-                        break
-                    else:
-                        # Busy channel. Disconnect current and retry.
-                        self.disconnect()
-                        logger.info(self.log_prefix + "Service not ready, retrying in {}s.".format(
-                            self.ENV_RETRY_DELAY))
-                        await asyncio.sleep(self.ENV_RETRY_DELAY)
-
-                return await self.call(obs=initial_obs)
-
-            except Exception as e:
-                logger.error(self.log_prefix + 'Exception call; retrying ({}/{}).:\n{}'.format(
-                    i, self.EXCEPTION_RETRIES, e))
-                traceback.print_exc()
-                # We always disconnect the channel upon exceptions.
-                self.disconnect()
-            await asyncio.sleep(1)
-
-    async def call(self, obs):
-        logger.info(self.log_prefix + 'Starting game.')
-        rewards = []
-        log_probs = []
-        hidden = None
-        player_id = 0
+    def __init__(self, player_id, team_id):
+        self.player_id = player_id
+        self.policy_inputs = []
+        self.action_dicts = []
+        self.rewards = []
+        self.hidden = None
+        self.team_id = team_id
+        self.start_time = time.time()
 
 
-        policy_inputs = []
-        action_dicts = []
-
-
-        for step in range(N_STEPS):  # Steps/actions in the environment
-            prev_obs = obs
-
-            action_dict, policy_input, unit_handles, hidden = self.select_action(
-                world_state=obs,
-                player_id=player_id,
-                hidden=hidden,
-                )
-
-            policy_inputs.append(policy_input)
-            action_dicts.append(action_dict)
-
-            logger.debug('action:\n' + pformat(action_dict))
-
-            # log_probs.append({k: v['logprob'] for k, v in action.items() if 'logprob' in v})
-
-            action_pb = self.action_to_pb(action_dict=action_dict, state=obs, player_id=player_id, unit_handles=unit_handles)
-            action_pb.player = player_id
-
-            actions_pb = CMsgBotWorldState.Actions(actions=[action_pb])
-            actions_pb.dota_time = obs.dota_time
-
-            response = await asyncio.wait_for(self.env.step(Actions(actions=actions_pb)), timeout=15)
-            if response.status != Status.Value('OK'):
-                raise ValueError(self.log_prefix + 'Step reponse invalid:\n{}'.format(response))
-            obs = response.world_state
-
-            reward = get_reward(prev_obs=prev_obs, obs=obs, player_id=player_id)
-
-            logger.debug(self.log_prefix + 'step={} reward={:.3f}\n'.format(step, sum(reward.values())))
-            rewards.append(reward)
-
-        await asyncio.wait_for(self.env.clear(Empty()), timeout=15)
-
-        # Ship the experience.
-        channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
-        env = DotaOptimizerStub(channel)
-        _ = await env.Rollout(RolloutData(
-            game_id='my_game_id',
-            actions=pickle.dumps(action_dicts),
-            states=pickle.dumps(policy_inputs),
-            rewards=pickle.dumps(rewards),
-            ))
-        channel.close()
-
-
-        reward_sum = sum([sum(r.values()) for r in rewards])
-        logger.info(self.log_prefix + 'Finished. reward_sum={:.2f}'.format(reward_sum))
-        return rewards
-
-    def unit_matrix(self, state, hero_unit, team_id, unit_types):
+    @staticmethod
+    def unit_matrix(state, hero_unit, team_id, unit_types):
         handles = []
         m = []
         for unit in state.units:
@@ -282,11 +185,11 @@ class Actor:
                 handles.append(unit.handle)
         return m, handles
 
-    def select_action(self, world_state, player_id, hidden):
+    def select_action(self, world_state, hidden):
         actions = {}
 
         # Preprocess the state
-        hero_unit = get_hero_unit(world_state, player_id=player_id)
+        hero_unit = get_unit(world_state, player_id=self.player_id)
 
         # Location Input
         location_state = torch.Tensor([hero_unit.location.x, hero_unit.location.y]).unsqueeze(0) / 7000.  # maps the map between [-1 and 1]
@@ -300,7 +203,7 @@ class Actor:
         enemy_nonheroes, enemy_nonhero_handles = self.unit_matrix(
             state=world_state,
             hero_unit=hero_unit,
-            unit_types=[CMsgBotWorldState.UnitType.Value('LANE_CREEP'), CMsgBotWorldState.UnitType.Value('CREEP_HERO')],
+            unit_types=[CMsgBotWorldState.UnitType.Value('LANE_CREEP'), CMsgBotWorldState.UnitType.Value('CREEP_HERO'), CMsgBotWorldState.UnitType.Value('HERO')],
             team_id=OPPOSITE_TEAM[hero_unit.team_id],
             )
 
@@ -311,13 +214,22 @@ class Actor:
             team_id=hero_unit.team_id,
             )
 
-        unit_handles = enemy_nonhero_handles + allied_nonhero_handles
+        enemy_heroes, enemy_hero_handles = self.unit_matrix(
+            state=world_state,
+            hero_unit=hero_unit,
+            unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
+            team_id=hero_unit.team_id,
+        )
+
+
+        unit_handles = enemy_nonhero_handles + allied_nonhero_handles + enemy_hero_handles
 
         policy_input = dict(
             loc=location_state,
             env=env_state,
             enemy_nonheroes=enemy_nonheroes,
             allied_nonheroes=allied_nonheroes,
+            enemy_heroes=enemy_heroes,
         )
 
         head_prob_dict, hidden = policy(**policy_input, hidden=hidden)
@@ -326,10 +238,9 @@ class Actor:
 
         return action_dict, policy_input, unit_handles, hidden
 
-    @staticmethod
-    def action_to_pb(action_dict, state, player_id, unit_handles):
+    def action_to_pb(self, action_dict, state, unit_handles):
         # TODO(tzaman): Recrease the scope of this function. Make it a converter only.
-        hero_unit = get_hero_unit(state, player_id=player_id)
+        hero_unit = get_unit(state, player_id=self.player_id)
 
         action_pb = CMsgBotWorldState.Action()
         # action_pb.actionDelay = action_dict['delay'] * DELAY_ENUM_TO_STEP
@@ -356,6 +267,158 @@ class Actor:
             raise ValueError("unknown action {}".format(action_enum))
         return action_pb
 
+    def obs_to_action(self, obs):
+        action_dict, policy_input, unit_handles, self.hidden = self.select_action(
+            world_state=obs,
+            hidden=self.hidden,
+            )
+
+        self.policy_inputs.append(policy_input)
+        self.action_dicts.append(action_dict)
+
+        logger.debug('action:\n' + pformat(action_dict))
+
+        action_pb = self.action_to_pb(action_dict=action_dict, state=obs, unit_handles=unit_handles)
+        action_pb.player = self.player_id
+        return action_pb
+
+    def compute_reward(self, prev_obs, obs):
+        reward = get_reward(prev_obs=prev_obs, obs=obs, player_id=self.player_id)
+        self.rewards.append(reward)
+
+    def print_summary(self):
+        time_per_batch = time.time() - self.start_time
+        steps_per_s = len(self.rewards) / time_per_batch
+
+        reward_counter = Counter()
+        for r in self.rewards:
+            reward_counter.update(r)
+        reward_counter = dict(reward_counter)
+                
+        reward_sum = sum(reward_counter.values())
+        logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
+            self.player_id, reward_sum, pformat(reward_counter)))
+
+    async def rollout(self):
+        logger.info('::Player:rollout()')
+
+        self.print_summary()
+
+        # Ship the experience.
+        channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
+        env = DotaOptimizerStub(channel)
+        _ = await env.Rollout(RolloutData(
+            game_id='my_game_id',
+            actions=pickle.dumps(self.action_dicts),
+            states=pickle.dumps(self.policy_inputs),
+            rewards=pickle.dumps(self.rewards),
+            ))
+        channel.close()
+
+    async def go(self, env):
+        logger.info('::Player:go()')
+        response = await env.initialize(Init(team_id=self.team_id))
+        obs = response.world_state
+
+        for step in range(N_STEPS):  # Steps/actions in the environment
+            # logger.info('team={} step={} time={}'.format(self.team_id, step, obs.dota_time))
+            prev_obs = obs
+
+            action_pb = self.obs_to_action(obs=obs)
+            actions_pb = CMsgBotWorldState.Actions(actions=[action_pb])
+            actions_pb.dota_time = obs.dota_time
+
+            response = await env.step(Actions(actions=actions_pb, team_id=self.team_id))
+
+            if response.status != Status.Value('OK'):
+                raise ValueError(self.log_prefix + 'Step response invalid:\n{}'.format(response))
+
+            obs = response.world_state
+
+            self.compute_reward(prev_obs=prev_obs, obs=obs)
+
+        await env.close(Init(team_id=self.team_id))
+
+
+class Actor:
+
+    ENV_RETRY_DELAY = 15
+    EXCEPTION_RETRIES = 10
+
+    def __init__(self, config, host=DOTASERVICE_HOST, port=DOTASERVICE_PORT):
+        self.host = host
+        self.port = port
+        self.config = config
+        # self.log_prefix = 'Actor {}: '.format(self.name)
+        self.env = None
+        self.channel = None
+
+    def connect(self):
+        if self.channel is None:  # TODO(tzaman) OR channel is closed? How?
+            # Set up a channel.
+            self.channel = Channel(self.host, self.port, loop=asyncio.get_event_loop())
+            self.env = DotaServiceStub(self.channel)
+            logger.info('Channel opened.')
+
+    def disconnect(self):
+        if self.channel is not None:
+            self.channel.close()
+            self.channel = None
+            self.env = None
+            logger.info('Channel closed.')
+
+    async def __call__(self):
+        # When an actor is being called it should first open up a channel. When a channel is opened
+        # it makes sense to try to re-use it for this actor. So if a channel has already been
+        # opened we should try to reuse.
+        for i in range(self.EXCEPTION_RETRIES):
+            try:
+                while True:
+                    self.connect()
+
+                    # Wait for game to boot.
+                    response = await asyncio.wait_for(self.env.reset(self.config), timeout=90)
+                    if response.status == Status.Value('OK'):
+                        # initial_obs_radiant = response.world_state_radiant
+                        # initial_obs_dire = response.world_state_dire
+                        break
+                    else:
+                        # Busy channel. Disconnect current and retry.
+                        self.disconnect()
+                        logger.info("Service not ready, retrying in {}s.".format(
+                            self.ENV_RETRY_DELAY))
+                        await asyncio.sleep(self.ENV_RETRY_DELAY)
+
+                return await self.call()  #obs_radiant=initial_obs_radiant, obs_dire=initial_obs_dire)
+
+            except Exception as e:
+                logger.error('Exception call; retrying ({}/{}).:\n{}'.format(
+                    i, self.EXCEPTION_RETRIES, e))
+                traceback.print_exc()
+                # We always disconnect the channel upon exceptions.
+                self.disconnect()
+            await asyncio.sleep(1)
+    
+
+    async def call(self):
+        logger.info('Starting game.')
+
+        player_radiant = Player(player_id=0, team_id=Team.Value('RADIANT'))
+        player_dire = Player(player_id=5, team_id=Team.Value('DIRE'))
+
+        t1 = player_radiant.go(env=self.env)
+        t2 = player_dire.go(env=self.env)
+
+        await asyncio.gather(t1, t2)
+
+        await asyncio.wait_for(self.env.clear(Empty()), timeout=15)
+
+        await player_radiant.rollout()
+        await player_dire.rollout()
+
+        logger.info('Game finished.')
+        
+        
 
 
 async def main():
@@ -365,12 +428,12 @@ async def main():
         host_mode=HOST_MODE,
     )
 
-    actor = Actor(config=config, host=DOTASERVICE_HOST, name=0)
+    actor = Actor(config=config, host=DOTASERVICE_HOST)
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
 
-        # Get the latest weights
+        # Connect to optimizer and get the latest weights
         while True:
             try:
                 channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
@@ -381,35 +444,24 @@ async def main():
                 policy.load_state_dict(state_dict, strict=True)
                 channel.close()
                 break
-            except:
-                print('Retrying conn..')
-                await asyncio.sleep(5)
+                logger.info('Connected to optimizer.')
+            except Exception as e:
+                logger.error('Retrying connection to optimizer. ({})'.format(e))
+                await asyncio.sleep(10)
 
+        await actor()
 
-        all_rewards = []
-        start_time = time.time()
-
-        rewards = await actor()
-    
-        all_rewards.append(rewards)
-
-
-        time_per_batch = time.time() - start_time
-        steps_per_s = len(rewards) / time_per_batch
-
-
-        reward_counter = Counter()
-        for b in all_rewards: # Jobs in a batch.
-            for s in b: # Steps in a batch.
-                reward_counter.update(s)
-        reward_counter = dict(reward_counter)
-                
-        reward_sum = sum(reward_counter.values())
-        avg_reward = reward_sum
-        logger.info('Episode={} avg_reward={:.2f} steps/s={:.2f}'.format(
-            episode, avg_reward, steps_per_s))
-        logger.info('Subrewards:\n{}'.format(pformat(reward_counter)))
+        logger.info('Episode={}'.format(episode))
+        
+        
 
 
 if __name__ == '__main__':
+    # global OPTIMIZER_HOST
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--ip", type=str, help="optimizer IP", default=OPTIMIZER_HOST)
+    args = parser.parse_args()
+
+    OPTIMIZER_HOST = args.ip
+
     asyncio.run(main())
