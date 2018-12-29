@@ -31,7 +31,7 @@ torch.manual_seed(7)
 eps = np.finfo(np.float32).eps.item()
 
 LEARNING_RATE = 1e-4
-MIN_BATCH_SIZE = 16
+MIN_BATCH_SIZE = 32
 
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
@@ -42,8 +42,8 @@ MODEL_FILENAME_FMT = "model_%09d.pt"
 
 # START_EPISODE = 0
 # PRETRAINED_MODEL = None
-START_EPISODE = 2394
-PRETRAINED_MODEL = 'runs/Dec28_12-16-50_optimizer-5c9bfbfdf7-5mg8t/' + MODEL_FILENAME_FMT % START_EPISODE
+START_EPISODE = 2810
+PRETRAINED_MODEL = 'runs/Dec29_00-31-40_optimizer-5c9bfbfdf7-9h26p/' + MODEL_FILENAME_FMT % START_EPISODE
 model_blob = bucket.get_blob(PRETRAINED_MODEL)
 PRETRAINED_MODEL = '/tmp/mdl.pt'
 model_blob.download_to_filename(PRETRAINED_MODEL)

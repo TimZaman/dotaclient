@@ -47,7 +47,7 @@ torch.manual_seed(7)
 OPPOSITE_TEAM = {Team.Value('DIRE'): Team.Value('RADIANT'), Team.Value('RADIANT'): Team.Value('DIRE')}
 
 # Variables
-ROLLOUT_SIZE = 500
+ROLLOUT_SIZE = 200
 
 TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
@@ -115,10 +115,6 @@ def get_reward(prev_obs, obs, player_id):
     mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
     mid_tower = get_mid_tower(obs, team_id=player.team_id)
 
-    mid_tower_enemy_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
-    mid_tower_enemy = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
-    
-
     reward = {}
 
     # XP Reward
@@ -148,7 +144,6 @@ def get_reward(prev_obs, obs, player_id):
     reward['denies'] = denies * 0.2
 
     # Tower hp reward. Note: towers have 1900 hp.
-    reward['enemy_tower_hp'] = (mid_tower_enemy_init.health - mid_tower_enemy.health) / 1000.
     reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 1000.
 
     return reward
@@ -193,22 +188,80 @@ def get_mid_tower(state, team_id):
     for unit in state.units:
         if unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER') \
             and unit.team_id == team_id \
-            and 'tower2_mid' in unit.name:
+            and 'tower1_mid' in unit.name:
             return unit
     raise ValueError("tower not found in state:\n{}".format(state))
 
 
+
+class Roller:
+
+    def __init__(self):
+        self.game_id = 'my_game_id'
+        self.queues = {
+            Team.Value('RADIANT'): asyncio.Queue(loop=asyncio.get_event_loop()),
+            Team.Value('DIRE'): asyncio.Queue(loop=asyncio.get_event_loop()),
+        }
+        asyncio.create_task(self._rollout_loop())
+    
+    def set_rollout(self, team_id, sar_dict):
+        self.queues[team_id].put_nowait(sar_dict)
+
+    async def _rollout_loop(self):
+        # This loop drains and ships the rollout queue.
+        while True:
+            # Each rollout should have information of both teams
+            sar_radiant = await self.queues[Team.Value('RADIANT')].get()
+            sar_dire = await self.queues[Team.Value('DIRE')].get()
+
+            # Subtract eachothers rewards
+            assert len(sar_radiant) == len(sar_dire)
+            for rr, rd in zip(sar_radiant['rewards'], sar_dire['rewards']):
+                rr_enemy = -sum(rd.values())
+                rd_enemy = -sum(rr.values())
+                rr['enemy'] = rr_enemy
+                rd['enemy'] = rd_enemy
+
+            self.print_reward_summary(sar_radiant['rewards'])
+            self.print_reward_summary(sar_dire['rewards'])
+
+            await self._rollout(sar_dicts=[sar_radiant, sar_dire])
+
+    async def _rollout(self, sar_dicts):
+        # Ship the experience.
+        channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
+        env = DotaOptimizerStub(channel)
+        for sar_dict in sar_dicts:
+            _ = await env.Rollout(RolloutData(
+                game_id=self.game_id,
+                states=pickle.dumps(sar_dict['states']),
+                actions=pickle.dumps(sar_dict['actions']),
+                rewards=pickle.dumps(sar_dict['rewards']),
+                ))
+        channel.close()
+
+    def print_reward_summary(self, rewards):
+        reward_counter = Counter()
+        for r in rewards:
+            reward_counter.update(r)
+        reward_counter = dict(reward_counter)
+                
+        reward_sum = sum(reward_counter.values())
+        logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
+            -1, reward_sum, pformat(reward_counter)))
+
+
 class Player:
 
-    def __init__(self, player_id, team_id):
+    def __init__(self, player_id, team_id, roller):
         self.player_id = player_id
         self.policy_inputs = []
         self.action_dicts = []
         self.rewards = []
         self.hidden = None
         self.team_id = team_id
-        self.start_time = time.time()
-
+        self.sync_event = asyncio.Event()
+        self.roller = roller
 
     @staticmethod
     def unit_matrix(state, hero_unit, team_id, unit_types):
@@ -324,36 +377,18 @@ class Player:
         reward = get_reward(prev_obs=prev_obs, obs=obs, player_id=self.player_id)
         self.rewards.append(reward)
 
-    def print_summary(self):
-        time_per_batch = time.time() - self.start_time
-        steps_per_s = len(self.rewards) / time_per_batch
-
-        reward_counter = Counter()
-        for r in self.rewards:
-            reward_counter.update(r)
-        reward_counter = dict(reward_counter)
-                
-        reward_sum = sum(reward_counter.values())
-        logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
-            self.player_id, reward_sum, pformat(reward_counter)))
-
     async def rollout(self):
         logger.info('::Player:rollout()')
 
-        self.print_summary()
+        sar_dict = {
+            'states': self.policy_inputs,
+            'actions': self.action_dicts,
+            'rewards': self.rewards,
+        }
 
-        # Ship the experience.
-        channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
-        env = DotaOptimizerStub(channel)
-        _ = await env.Rollout(RolloutData(
-            game_id='my_game_id',
-            actions=pickle.dumps(self.action_dicts),
-            states=pickle.dumps(self.policy_inputs),
-            rewards=pickle.dumps(self.rewards),
-            ))
-        channel.close()
+        self.roller.set_rollout(team_id=self.team_id, sar_dict=sar_dict)
 
-        # Finally clear the current state.
+        # Reset the current SAR.
         self.policy_inputs = []
         self.action_dicts = []
         self.rewards = []
@@ -372,7 +407,7 @@ class Player:
             actions_pb.dota_time = obs.dota_time
 
             try:
-                response = await asyncio.wait_for(env.step(Actions(actions=actions_pb, team_id=self.team_id)), timeout=5)
+                response = await asyncio.wait_for(env.step(Actions(actions=actions_pb, team_id=self.team_id)), timeout=10)
             except asyncio.TimeoutError:
                 logger.warning('step timed out.')
                 break
@@ -380,7 +415,6 @@ class Player:
             # if response.status == Status.Value('OUT_OF_RANGE'):
             #     logger.info('Game done.')
             #     break
-
             if response.status != Status.Value('OK'):
                 raise ValueError(self.log_prefix + 'Step response invalid:\n{}'.format(response))
 
@@ -446,7 +480,7 @@ class Actor:
                     self.connect()
 
                     # Wait for game to boot.
-                    response = await asyncio.wait_for(self.env.reset(self.config), timeout=90)
+                    response = await asyncio.wait_for(self.env.reset(self.config), timeout=100)
                     if response.status == Status.Value('OK'):
                         # initial_obs_radiant = response.world_state_radiant
                         # initial_obs_dire = response.world_state_dire
@@ -471,8 +505,13 @@ class Actor:
     async def call(self):
         logger.info('Starting game.')
 
-        player_radiant = Player(player_id=0, team_id=Team.Value('RADIANT'))
-        player_dire = Player(player_id=5, team_id=Team.Value('DIRE'))
+        roller = Roller()
+
+        player_radiant = Player(player_id=0, team_id=Team.Value('RADIANT'), roller=roller)
+        player_dire = Player(player_id=5, team_id=Team.Value('DIRE'), roller=roller)
+
+        player_radiant.opponent_player = player_dire
+        player_dire.opponent_player = player_radiant
 
         t1 = player_radiant.go(env=self.env)
         t2 = player_dire.go(env=self.env)
