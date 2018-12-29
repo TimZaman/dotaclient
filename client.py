@@ -11,6 +11,7 @@ import traceback
 import uuid
 
 from dotaservice.protos.dota_gcmessages_common_bot_script_pb2 import CMsgBotWorldState
+from dotaservice.protos.dota_shared_enums_pb2 import DOTA_GAMEMODE_1V1MID
 from dotaservice.protos.DotaService_grpc import DotaServiceStub
 from dotaservice.protos.DotaService_pb2 import Actions
 from dotaservice.protos.DotaService_pb2 import Config
@@ -46,7 +47,7 @@ torch.manual_seed(7)
 OPPOSITE_TEAM = {Team.Value('DIRE'): Team.Value('RADIANT'), Team.Value('RADIANT'): Team.Value('DIRE')}
 
 # Variables
-N_STEPS = 350
+ROLLOUT_SIZE = 500
 
 TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
@@ -111,6 +112,13 @@ def get_reward(prev_obs, obs, player_id):
     player_init = get_player(prev_obs, player_id=player_id)
     player = get_player(obs, player_id=player_id)
 
+    mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
+    mid_tower = get_mid_tower(obs, team_id=player.team_id)
+
+    mid_tower_enemy_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
+    mid_tower_enemy = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
+    
+
     reward = {}
 
     # XP Reward
@@ -128,7 +136,7 @@ def get_reward(prev_obs, obs, player_id):
         reward['hp'] = 0
 
     # Kill and death rewards
-    reward['kills'] = (player.kills - player_init.kills) * 0.5
+    reward['kills'] = (player.kills - player_init.kills) * 1.0
     reward['death'] = (player.deaths - player_init.deaths) * - 0.5
 
     # Last-hit reward
@@ -139,11 +147,33 @@ def get_reward(prev_obs, obs, player_id):
     denies = unit.denies - unit_init.denies
     reward['denies'] = denies * 0.2
 
+    # Tower hp reward. Note: towers have 1900 hp.
+    reward['enemy_tower_hp'] = (mid_tower_enemy_init.health - mid_tower_enemy.health) / 1000.
+    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 1000.
+
     return reward
 
 
 policy = Policy()
 optimizer = optim.SGD(policy.parameters(), lr=LEARNING_RATE)
+
+
+async def get_latest_weights():
+    # Connect to optimizer and get the latest weights
+    while True:
+        try:
+            channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
+            env = DotaOptimizerStub(channel)
+            response =  await env.GetWeights(Empty2())
+            state_dict_p = response.data
+            state_dict = pickle.loads(state_dict_p)
+            policy.load_state_dict(state_dict, strict=True)
+            channel.close()
+            break
+            logger.info('Connected to optimizer.')
+        except Exception as e:
+            logger.error('Retrying connection to optimizer. ({})'.format(e))
+            await asyncio.sleep(10)
 
 
 def get_player(state, player_id):
@@ -157,7 +187,15 @@ def get_unit(state, player_id):
         if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO') \
             and unit.player_id == player_id:
             return unit
-    raise ValueError("hero {} not found in state:\n{}".format(player_id, state))
+    raise ValueError("unit {} not found in state:\n{}".format(player_id, state))
+
+def get_mid_tower(state, team_id):
+    for unit in state.units:
+        if unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER') \
+            and unit.team_id == team_id \
+            and 'tower2_mid' in unit.name:
+            return unit
+    raise ValueError("tower not found in state:\n{}".format(state))
 
 
 class Player:
@@ -218,7 +256,7 @@ class Player:
             state=world_state,
             hero_unit=hero_unit,
             unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
-            team_id=hero_unit.team_id,
+            team_id=OPPOSITE_TEAM[hero_unit.team_id],
         )
 
 
@@ -315,20 +353,33 @@ class Player:
             ))
         channel.close()
 
+        # Finally clear the current state.
+        self.policy_inputs = []
+        self.action_dicts = []
+        self.rewards = []
+
     async def go(self, env):
         logger.info('::Player:go()')
         response = await env.initialize(Init(team_id=self.team_id))
         obs = response.world_state
 
-        for step in range(N_STEPS):  # Steps/actions in the environment
-            # logger.info('team={} step={} time={}'.format(self.team_id, step, obs.dota_time))
+        for step in range(100000):  # Steps/actions in the environment
+            # logger.info('team={}, step={}, time={:.2f}'.format(self.team_id, step, obs.dota_time))
             prev_obs = obs
 
             action_pb = self.obs_to_action(obs=obs)
             actions_pb = CMsgBotWorldState.Actions(actions=[action_pb])
             actions_pb.dota_time = obs.dota_time
 
-            response = await env.step(Actions(actions=actions_pb, team_id=self.team_id))
+            try:
+                response = await asyncio.wait_for(env.step(Actions(actions=actions_pb, team_id=self.team_id)), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning('step timed out.')
+                break
+
+            # if response.status == Status.Value('OUT_OF_RANGE'):
+            #     logger.info('Game done.')
+            #     break
 
             if response.status != Status.Value('OK'):
                 raise ValueError(self.log_prefix + 'Step response invalid:\n{}'.format(response))
@@ -337,7 +388,25 @@ class Player:
 
             self.compute_reward(prev_obs=prev_obs, obs=obs)
 
+            if step % ROLLOUT_SIZE == 0 and step > 0:
+                await self.rollout()
+                # TODO(tzaman): potentially reload weights.
+
+                if self.team_id == Team.Value('RADIANT'):
+                    # Only one team refreshes weights because we only have one set of them.
+                    await get_latest_weights()
+
+        # TODO(tzaman): do a final rollout. How to deal with very small experience leftovers?
+
+        # TODO(tzaman): the worldstate ends when game is over. the worldstate doesn't have info
+        # about who won the game: so we need to get info from that somehow.
+
+
+        print('closing.')
         await env.close(Init(team_id=self.team_id))
+        print('closed.')
+
+
 
 
 class Actor:
@@ -398,7 +467,6 @@ class Actor:
                 # We always disconnect the channel upon exceptions.
                 self.disconnect()
             await asyncio.sleep(1)
-    
 
     async def call(self):
         logger.info('Starting game.')
@@ -413,12 +481,7 @@ class Actor:
 
         await asyncio.wait_for(self.env.clear(Empty()), timeout=15)
 
-        await player_radiant.rollout()
-        await player_dire.rollout()
-
         logger.info('Game finished.')
-        
-        
 
 
 async def main():
@@ -426,34 +489,16 @@ async def main():
         ticks_per_observation=TICKS_PER_OBSERVATION,
         host_timescale=HOST_TIMESCALE,
         host_mode=HOST_MODE,
+        game_mode=DOTA_GAMEMODE_1V1MID,
     )
 
     actor = Actor(config=config, host=DOTASERVICE_HOST)
 
+    await get_latest_weights()
+
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
-
-        # Connect to optimizer and get the latest weights
-        while True:
-            try:
-                channel = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
-                env = DotaOptimizerStub(channel)
-                response =  await env.GetWeights(Empty2())
-                state_dict_p = response.data
-                state_dict = pickle.loads(state_dict_p)
-                policy.load_state_dict(state_dict, strict=True)
-                channel.close()
-                break
-                logger.info('Connected to optimizer.')
-            except Exception as e:
-                logger.error('Retrying connection to optimizer. ({})'.format(e))
-                await asyncio.sleep(10)
-
         await actor()
-
-        logger.info('Episode={}'.format(episode))
-        
-        
 
 
 if __name__ == '__main__':

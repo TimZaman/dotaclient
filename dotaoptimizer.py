@@ -26,23 +26,27 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+torch.manual_seed(7)
+
 eps = np.finfo(np.float32).eps.item()
 
 LEARNING_RATE = 1e-4
-MIN_BATCH_SIZE = 4
+MIN_BATCH_SIZE = 16
 
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
 
-START_EPISODE = 969
+
 USE_CHECKPOINTS = True
 MODEL_FILENAME_FMT = "model_%09d.pt"
 
-PRETRAINED_MODEL = None
-# PRETRAINED_MODEL = 'runs/Dec26_22-48-12_Tims-MacBook-Pro.local/' + MODEL_FILENAME_FMT % START_EPISODE
-# model_blob = bucket.get_blob(PRETRAINED_MODEL)
-# PRETRAINED_MODEL = '/tmp/mdl.pt'
-# model_blob.download_to_filename(PRETRAINED_MODEL)
+# START_EPISODE = 0
+# PRETRAINED_MODEL = None
+START_EPISODE = 2394
+PRETRAINED_MODEL = 'runs/Dec28_12-16-50_optimizer-5c9bfbfdf7-5mg8t/' + MODEL_FILENAME_FMT % START_EPISODE
+model_blob = bucket.get_blob(PRETRAINED_MODEL)
+PRETRAINED_MODEL = '/tmp/mdl.pt'
+model_blob.download_to_filename(PRETRAINED_MODEL)
 
 
 
@@ -73,6 +77,8 @@ class DotaOptimizer(DotaOptimizerBase):
             self.writer = SummaryWriter()
             logger.info('Checkpointing to: {}'.format(self.log_dir))
 
+        # Start the stepper
+        asyncio.create_task(self.stepper())
 
     @property
     def events_filename(self):
@@ -128,18 +134,27 @@ class DotaOptimizer(DotaOptimizerBase):
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
-    async def step(self):
-        logger.info('::step')
+
+    async def stepper(self):
+        experiences = []
+        while True:
+            experience = await self.experience_queue.get()
+            experiences.append(experience)
+            if len(experiences) >= MIN_BATCH_SIZE:
+                self.step(experiences=experiences)
+                experiences = []
+
+    def step(self, experiences):
+        logger.info('::step episode={}'.format(self.episode))
         # Get item form queue
         all_reward_sums = []
         all_discounted_rewards = []
         all_logprobs = []
         all_rewards = []
 
+        batch_size = len(experiences)
         # Loop over each experience
-        batch_size = None
-        while self.experience_queue.qsize() > 0:
-            experience = await self.experience_queue.get()
+        for experience in experiences:
             log_prob_sum = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
@@ -155,7 +170,6 @@ class DotaOptimizer(DotaOptimizerBase):
             all_logprobs.extend(log_prob_sum)
 
         n_steps = len(all_discounted_rewards)
-        batch_size = len(all_reward_sums)
 
         loss = self.finish_episode(rewards=all_discounted_rewards, log_probs=all_logprobs)
 
@@ -178,7 +192,7 @@ class DotaOptimizer(DotaOptimizerBase):
 
         if USE_CHECKPOINTS:
             # TODO(tzaman): should we write a model snapshot at episode 0?
-
+            self.writer.add_scalar('batch_size', batch_size, self.episode)
             self.writer.add_scalar('steps per s', steps_per_s, self.episode)
             self.writer.add_scalar('loss', loss, self.episode)
             self.writer.add_scalar('mean_reward', mean_reward, self.episode)
@@ -198,8 +212,9 @@ class DotaOptimizer(DotaOptimizerBase):
 
 
     async def Rollout(self, stream):
-        # print('::Rollout')
+        # logger.info('::Rollout')
         request = await stream.recv_message()
+        await stream.send_message(Empty2())
 
         states = pickle.loads(request.states)
         actions = pickle.loads(request.actions)
@@ -209,13 +224,9 @@ class DotaOptimizer(DotaOptimizerBase):
 
         await self.experience_queue.put(experience)
 
-        if self.experience_queue.qsize() >= MIN_BATCH_SIZE:
-            await self.step()
-
-        await stream.send_message(Empty2())  # TODO(tzaman): Respond earlier?
 
     async def GetWeights(self, stream):
-        # print('::GetWeights')
+        # logger.info('::GetWeights')
         _ = await stream.recv_message()
 
         state_dict = self.policy.state_dict()

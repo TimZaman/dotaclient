@@ -13,7 +13,9 @@ RUN apt-get -q update \
     rm -rf /var/lib/{apt,dpkg,cache,log}/ \
  && curl -s https://bootstrap.pypa.io/get-pip.py | python3.7
 
-RUN pip3.7 install --user dotaservice==0.1.5 torch tensorboardX google-cloud-storage
+RUN pip3.7 install --user torch tensorboardX google-cloud-storage
+
+RUN pip3.7 install --user dotaservice==0.2.0
 
 RUN mkdir /root/dotaclient
 

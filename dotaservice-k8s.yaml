@@ -1,10 +1,10 @@
 apiVersion: v1
-kind: Service  # my-optimizer.default.svc.cluster.local
+kind: Service  # optimizer.default.svc.cluster.local
 metadata:
-  name: my-optimizer
+  name: optimizer
   namespace: default
   labels:
-    run: my-optimizer
+    run: optimizer
 spec:
   type: ClusterIP
   ports:
@@ -12,21 +12,21 @@ spec:
     port: 50051
     targetPort: 50051
   selector:
-    run: my-optimizer
+    run: optimizer
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: my-optimizer
+  name: optimizer
 spec:
   selector:
     matchLabels:
-      run: my-optimizer
+      run: optimizer
   replicas: 1
   template:
     metadata:
       labels:
-        run: my-optimizer
+        run: optimizer
     spec:
       affinity:
         nodeAffinity:
@@ -58,7 +58,7 @@ spec:
           containerPort: 50051
         resources:
           requests:
-            cpu: 300m  # ~80m per dotaservice
+            cpu: 600m  # ~80m per dotaservice
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -67,7 +67,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 1
+  replicas: 16
   selector:
     matchLabels:
       app: dotaservice
@@ -76,6 +76,8 @@ spec:
       labels:
         app: dotaservice
     spec:
+      nodeSelector:
+        cloud.google.com/gke-preemptible: "true"
       containers:
       - name: client
         image: gcr.io/dotaservice-225201/dotaclient:latest
@@ -83,14 +85,17 @@ spec:
         - python3.7
         - client.py
         - --ip
-        - my-optimizer.default.svc.cluster.local
+        - optimizer.default.svc.cluster.local
         resources:
           requests:
-            cpu: 50m
+            cpu: 100m
       - name: dotaservice
         image: gcr.io/dotaservice-225201/dotaservice:0.2.0
         ports:
         - containerPort: 13337
         resources:
           requests:
-            cpu: 350m
+            cpu: 500m
+
+# TODO(tzaman): add rabbitmq for experience broker
+# docker run 15672:15672 -p 5672:5672 rabbitmq:3.7.8-management-alpine
