@@ -67,7 +67,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 16
+  replicas: 12
   selector:
     matchLabels:
       app: dotaservice
@@ -90,7 +90,7 @@ spec:
           requests:
             cpu: 100m
       - name: dotaservice
-        image: gcr.io/dotaservice-225201/dotaservice:0.2.0
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.0
         ports:
         - containerPort: 13337
         resources:

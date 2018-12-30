@@ -24,7 +24,7 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 torch.manual_seed(7)
 
@@ -36,18 +36,17 @@ MIN_BATCH_SIZE = 32
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
 
-
 USE_CHECKPOINTS = True
 MODEL_FILENAME_FMT = "model_%09d.pt"
 
-# START_EPISODE = 0
-# PRETRAINED_MODEL = None
-START_EPISODE = 2810
-PRETRAINED_MODEL = 'runs/Dec29_00-31-40_optimizer-5c9bfbfdf7-9h26p/' + MODEL_FILENAME_FMT % START_EPISODE
-model_blob = bucket.get_blob(PRETRAINED_MODEL)
-PRETRAINED_MODEL = '/tmp/mdl.pt'
-model_blob.download_to_filename(PRETRAINED_MODEL)
+START_EPISODE = 0
+PRETRAINED_MODEL = None
 
+# START_EPISODE = 3796
+# PRETRAINED_MODEL = 'runs/Dec29_23-45-58_optimizer-5c9bfbfdf7-5mdqw/' + MODEL_FILENAME_FMT % START_EPISODE
+# model_blob = bucket.get_blob(PRETRAINED_MODEL)
+# PRETRAINED_MODEL = '/tmp/mdl.pt'
+# model_blob.download_to_filename(PRETRAINED_MODEL)
 
 
 class Experience:
@@ -59,7 +58,6 @@ class Experience:
 
 
 class DotaOptimizer(DotaOptimizerBase):
-
     def __init__(self):
         super().__init__()
         self.policy = Policy()
@@ -129,11 +127,10 @@ class DotaOptimizer(DotaOptimizerBase):
             action_probs = self.policy.action_probs(
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
-                )
+            )
             # all_action_probs.append(action_probs)
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
-
 
     async def stepper(self):
         experiences = []
@@ -180,8 +177,8 @@ class DotaOptimizer(DotaOptimizerBase):
         logger.info('steps_per_s={}'.format(steps_per_s))
 
         reward_counter = Counter()
-        for b in all_rewards: # Jobs in a batch.
-            for s in b: # Steps in a batch.
+        for b in all_rewards:  # Jobs in a batch.
+            for s in b:  # Steps in a batch.
                 reward_counter.update(s)
         reward_counter = dict(reward_counter)
 
@@ -210,7 +207,6 @@ class DotaOptimizer(DotaOptimizerBase):
 
         self.episode += 1
 
-
     async def Rollout(self, stream):
         # logger.info('::Rollout')
         request = await stream.recv_message()
@@ -220,19 +216,37 @@ class DotaOptimizer(DotaOptimizerBase):
         actions = pickle.loads(request.actions)
         rewards = pickle.loads(request.rewards)
 
-        experience = Experience(game_id=request.game_id, states=states, actions=actions, rewards=rewards)
+        experience = Experience(
+            game_id=request.game_id, states=states, actions=actions, rewards=rewards)
 
         await self.experience_queue.put(experience)
 
-
     async def GetWeights(self, stream):
         # logger.info('::GetWeights')
-        _ = await stream.recv_message()
+        request = await stream.recv_message()
+        version = request.version
+
+        # Impossible to have a newer weight than the optimizer itself
+        assert version <= self.episode
+
+        if self.episode == version and version != 0:
+            # TODO(tzaman): version -1 should just always update weights
+            await stream.send_message(
+                Weights(
+                    status=Weights.Status.Value('UP_TO_DATE'),
+                    version=self.episode,
+                ))
+            return
 
         state_dict = self.policy.state_dict()
         state_dict_p = pickle.dumps(state_dict)
 
-        await stream.send_message(Weights(data=state_dict_p))
+        await stream.send_message(
+            Weights(
+                status=Weights.Status.Value('OK'),
+                version=self.episode,
+                data=state_dict_p,
+            ))
 
 
 async def serve(server, host, port):

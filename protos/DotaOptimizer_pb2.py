@@ -19,10 +19,32 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   package='',
   syntax='proto2',
   serialized_options=None,
-  serialized_pb=_b('\n\x1aprotos/DotaOptimizer.proto\"\x08\n\x06\x45mpty2\"\x17\n\x07Weights\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\"P\n\x0bRolloutData\x12\x0f\n\x07game_id\x18\x01 \x01(\t\x12\x0f\n\x07\x61\x63tions\x18\x02 \x01(\x0c\x12\x0e\n\x06states\x18\x03 \x01(\x0c\x12\x0f\n\x07rewards\x18\x04 \x01(\x0c\x32V\n\rDotaOptimizer\x12\"\n\x07Rollout\x12\x0c.RolloutData\x1a\x07.Empty2\"\x00\x12!\n\nGetWeights\x12\x07.Empty2\x1a\x08.Weights\"\x00')
+  serialized_pb=_b('\n\x1aprotos/DotaOptimizer.proto\"\x08\n\x06\x45mpty2\"\x1e\n\x0bWeightQuery\x12\x0f\n\x07version\x18\x01 \x01(\r\"k\n\x07Weights\x12\x1f\n\x06status\x18\x01 \x01(\x0e\x32\x0f.Weights.Status\x12\x0f\n\x07version\x18\x04 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\" \n\x06Status\x12\x06\n\x02OK\x10\x01\x12\x0e\n\nUP_TO_DATE\x10\x02\"t\n\x0bRolloutData\x12\x0f\n\x07game_id\x18\x01 \x01(\t\x12\x0f\n\x07team_id\x18\x02 \x01(\x05\x12\x11\n\tplayer_id\x18\x03 \x01(\x05\x12\x0f\n\x07\x61\x63tions\x18\x04 \x02(\x0c\x12\x0e\n\x06states\x18\x05 \x02(\x0c\x12\x0f\n\x07rewards\x18\x06 \x02(\x0c\x32[\n\rDotaOptimizer\x12\"\n\x07Rollout\x12\x0c.RolloutData\x1a\x07.Empty2\"\x00\x12&\n\nGetWeights\x12\x0c.WeightQuery\x1a\x08.Weights\"\x00')
 )
 
 
+
+_WEIGHTS_STATUS = _descriptor.EnumDescriptor(
+  name='Status',
+  full_name='Weights.Status',
+  filename=None,
+  file=DESCRIPTOR,
+  values=[
+    _descriptor.EnumValueDescriptor(
+      name='OK', index=0, number=1,
+      serialized_options=None,
+      type=None),
+    _descriptor.EnumValueDescriptor(
+      name='UP_TO_DATE', index=1, number=2,
+      serialized_options=None,
+      type=None),
+  ],
+  containing_type=None,
+  serialized_options=None,
+  serialized_start=147,
+  serialized_end=179,
+)
+_sym_db.RegisterEnumDescriptor(_WEIGHTS_STATUS)
 
 
 _EMPTY2 = _descriptor.Descriptor(
@@ -49,17 +71,17 @@ _EMPTY2 = _descriptor.Descriptor(
 )
 
 
-_WEIGHTS = _descriptor.Descriptor(
-  name='Weights',
-  full_name='Weights',
+_WEIGHTQUERY = _descriptor.Descriptor(
+  name='WeightQuery',
+  full_name='WeightQuery',
   filename=None,
   file=DESCRIPTOR,
   containing_type=None,
   fields=[
     _descriptor.FieldDescriptor(
-      name='data', full_name='Weights.data', index=0,
-      number=1, type=12, cpp_type=9, label=1,
-      has_default_value=False, default_value=_b(""),
+      name='version', full_name='WeightQuery.version', index=0,
+      number=1, type=13, cpp_type=3, label=1,
+      has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
@@ -76,7 +98,53 @@ _WEIGHTS = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=40,
-  serialized_end=63,
+  serialized_end=70,
+)
+
+
+_WEIGHTS = _descriptor.Descriptor(
+  name='Weights',
+  full_name='Weights',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='status', full_name='Weights.status', index=0,
+      number=1, type=14, cpp_type=8, label=1,
+      has_default_value=False, default_value=1,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='version', full_name='Weights.version', index=1,
+      number=4, type=5, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='data', full_name='Weights.data', index=2,
+      number=3, type=12, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b(""),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+    _WEIGHTS_STATUS,
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto2',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=72,
+  serialized_end=179,
 )
 
 
@@ -95,22 +163,36 @@ _ROLLOUTDATA = _descriptor.Descriptor(
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
     _descriptor.FieldDescriptor(
-      name='actions', full_name='RolloutData.actions', index=1,
-      number=2, type=12, cpp_type=9, label=1,
+      name='team_id', full_name='RolloutData.team_id', index=1,
+      number=2, type=5, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='player_id', full_name='RolloutData.player_id', index=2,
+      number=3, type=5, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='actions', full_name='RolloutData.actions', index=3,
+      number=4, type=12, cpp_type=9, label=2,
       has_default_value=False, default_value=_b(""),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
     _descriptor.FieldDescriptor(
-      name='states', full_name='RolloutData.states', index=2,
-      number=3, type=12, cpp_type=9, label=1,
+      name='states', full_name='RolloutData.states', index=4,
+      number=5, type=12, cpp_type=9, label=2,
       has_default_value=False, default_value=_b(""),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
     _descriptor.FieldDescriptor(
-      name='rewards', full_name='RolloutData.rewards', index=3,
-      number=4, type=12, cpp_type=9, label=1,
+      name='rewards', full_name='RolloutData.rewards', index=5,
+      number=6, type=12, cpp_type=9, label=2,
       has_default_value=False, default_value=_b(""),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
@@ -127,11 +209,14 @@ _ROLLOUTDATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=65,
-  serialized_end=145,
+  serialized_start=181,
+  serialized_end=297,
 )
 
+_WEIGHTS.fields_by_name['status'].enum_type = _WEIGHTS_STATUS
+_WEIGHTS_STATUS.containing_type = _WEIGHTS
 DESCRIPTOR.message_types_by_name['Empty2'] = _EMPTY2
+DESCRIPTOR.message_types_by_name['WeightQuery'] = _WEIGHTQUERY
 DESCRIPTOR.message_types_by_name['Weights'] = _WEIGHTS
 DESCRIPTOR.message_types_by_name['RolloutData'] = _ROLLOUTDATA
 _sym_db.RegisterFileDescriptor(DESCRIPTOR)
@@ -142,6 +227,13 @@ Empty2 = _reflection.GeneratedProtocolMessageType('Empty2', (_message.Message,),
   # @@protoc_insertion_point(class_scope:Empty2)
   ))
 _sym_db.RegisterMessage(Empty2)
+
+WeightQuery = _reflection.GeneratedProtocolMessageType('WeightQuery', (_message.Message,), dict(
+  DESCRIPTOR = _WEIGHTQUERY,
+  __module__ = 'protos.DotaOptimizer_pb2'
+  # @@protoc_insertion_point(class_scope:WeightQuery)
+  ))
+_sym_db.RegisterMessage(WeightQuery)
 
 Weights = _reflection.GeneratedProtocolMessageType('Weights', (_message.Message,), dict(
   DESCRIPTOR = _WEIGHTS,
@@ -165,8 +257,8 @@ _DOTAOPTIMIZER = _descriptor.ServiceDescriptor(
   file=DESCRIPTOR,
   index=0,
   serialized_options=None,
-  serialized_start=147,
-  serialized_end=233,
+  serialized_start=299,
+  serialized_end=390,
   methods=[
   _descriptor.MethodDescriptor(
     name='Rollout',
@@ -182,7 +274,7 @@ _DOTAOPTIMIZER = _descriptor.ServiceDescriptor(
     full_name='DotaOptimizer.GetWeights',
     index=1,
     containing_service=None,
-    input_type=_EMPTY2,
+    input_type=_WEIGHTQUERY,
     output_type=_WEIGHTS,
     serialized_options=None,
   ),

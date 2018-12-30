@@ -30,7 +30,7 @@ class DotaOptimizerBase(abc.ABC):
             '/DotaOptimizer/GetWeights': grpclib.const.Handler(
                 self.GetWeights,
                 grpclib.const.Cardinality.UNARY_UNARY,
-                protos.DotaOptimizer_pb2.Empty2,
+                protos.DotaOptimizer_pb2.WeightQuery,
                 protos.DotaOptimizer_pb2.Weights,
             ),
         }
@@ -48,6 +48,6 @@ class DotaOptimizerStub:
         self.GetWeights = grpclib.client.UnaryUnaryMethod(
             channel,
             '/DotaOptimizer/GetWeights',
-            protos.DotaOptimizer_pb2.Empty2,
+            protos.DotaOptimizer_pb2.WeightQuery,
             protos.DotaOptimizer_pb2.Weights,
         )
