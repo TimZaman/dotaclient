@@ -15,7 +15,7 @@ RUN apt-get -q update \
 
 RUN pip3.7 install --user torch tensorboardX google-cloud-storage
 
-RUN pip3.7 install --user dotaservice==0.2.0
+RUN pip3.7 install --user dotaservice==0.3.0
 
 RUN mkdir /root/dotaclient
 

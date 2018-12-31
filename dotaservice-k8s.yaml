@@ -58,7 +58,7 @@ spec:
           containerPort: 50051
         resources:
           requests:
-            cpu: 600m  # ~80m per dotaservice
+            cpu: 400m  # ~80m per dotaservice
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -90,7 +90,7 @@ spec:
           requests:
             cpu: 100m
       - name: dotaservice
-        image: gcr.io/dotaservice-225201/dotaservice:0.3.0
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.0f
         ports:
         - containerPort: 13337
         resources:
