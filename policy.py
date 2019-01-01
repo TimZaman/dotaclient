@@ -51,6 +51,18 @@ class Policy(nn.Module):
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
         self.affine_unit_attention = nn.Linear(128, 128)
 
+    def maybe_average_gradients(self):
+        if not torch.distributed.is_available():
+            return
+
+        if not torch.distributed.is_initialized():
+           return 
+
+        print('Policy::maybe_average_gradients')
+        size = float(torch.distributed.get_world_size())
+        for param in self.parameters():
+            torch.distributed.all_reduce(param.grad.data, op=torch.distributed.reduce_op.SUM)
+            param.grad.data /= size
 
     def get_grad_dict(self):
         logger.debug('Policy::get_grad_dict()')

@@ -4,20 +4,22 @@ import asyncio
 import logging
 import os
 import pickle
+import pika
 import time
 
 from google.cloud import storage
 from grpclib.server import Server
+import grpc
 from tensorboardX import SummaryWriter
 import numpy as np
 import torch
 import torch.optim as optim
 
 from policy import Policy
-from protos.DotaOptimizer_grpc import DotaOptimizerBase
-from protos.DotaOptimizer_grpc import DotaOptimizerBase
-from protos.DotaOptimizer_pb2 import Empty2
-from protos.DotaOptimizer_pb2 import Weights
+
+from protos.ModelService_pb2_grpc import ModelServiceStub
+from protos.ModelService_pb2 import Weights
+
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -31,19 +33,19 @@ torch.manual_seed(7)
 eps = np.finfo(np.float32).eps.item()
 
 LEARNING_RATE = 1e-4
-MIN_BATCH_SIZE = 32
+MIN_BATCH_SIZE = 4
 
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
 
-USE_CHECKPOINTS = True
-MODEL_FILENAME_FMT = "model_%09d.pt"
+# USE_CHECKPOINTS = False
+# MODEL_FILENAME_FMT = "model_%09d.pt"
 
 START_EPISODE = 0
-PRETRAINED_MODEL = None
+# PRETRAINED_MODEL = None
 
-# START_EPISODE = 3796
-# PRETRAINED_MODEL = 'runs/Dec29_23-45-58_optimizer-5c9bfbfdf7-5mdqw/' + MODEL_FILENAME_FMT % START_EPISODE
+# START_EPISODE = 647
+# PRETRAINED_MODEL = 'runs/Dec30_22-46-22_optimizer-55f6d8fd9c-2c788/' + MODEL_FILENAME_FMT % START_EPISODE
 # model_blob = bucket.get_blob(PRETRAINED_MODEL)
 # PRETRAINED_MODEL = '/tmp/mdl.pt'
 # model_blob.download_to_filename(PRETRAINED_MODEL)
@@ -57,7 +59,7 @@ class Experience:
         self.rewards = rewards
 
 
-class DotaOptimizer(DotaOptimizerBase):
+class DotaOptimizer():
     def __init__(self):
         super().__init__()
         self.policy = Policy()
@@ -65,18 +67,15 @@ class DotaOptimizer(DotaOptimizerBase):
         self.experience_queue = asyncio.Queue(loop=asyncio.get_event_loop())
         self.time_last_step = time.time()
 
-        pretrained_model = PRETRAINED_MODEL
-        if pretrained_model:
-            self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
+        # pretrained_model = PRETRAINED_MODEL
+        # if pretrained_model:
+        #     self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
 
         self.episode = START_EPISODE
 
-        if USE_CHECKPOINTS:
-            self.writer = SummaryWriter()
-            logger.info('Checkpointing to: {}'.format(self.log_dir))
+        self.writer = SummaryWriter()
+        logger.info('Checkpointing to: {}'.format(self.log_dir))
 
-        # Start the stepper
-        asyncio.create_task(self.stepper())
 
     @property
     def events_filename(self):
@@ -110,6 +109,7 @@ class DotaOptimizer(DotaOptimizerBase):
         self.optimizer.zero_grad()
         loss = torch.cat(loss).mean()
         loss.backward()
+        self.policy.maybe_average_gradients()
         self.optimizer.step()
 
         return loss
@@ -132,14 +132,21 @@ class DotaOptimizer(DotaOptimizerBase):
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
-    async def stepper(self):
-        experiences = []
+
+
+    def run(self):
+        connection = pika.BlockingConnection(pika.ConnectionParameters('127.0.0.1'))
+        channel = connection.channel()
         while True:
-            experience = await self.experience_queue.get()
-            experiences.append(experience)
-            if len(experiences) >= MIN_BATCH_SIZE:
-                self.step(experiences=experiences)
-                experiences = []
+            experiences = []
+            for _ in range(MIN_BATCH_SIZE):
+                method_frame, properties, body = next(channel.consume(queue='hello', no_ack=True))
+                data = pickle.loads(body)
+                experience = Experience(
+                    game_id=data['game_id'], states=data['states'], actions=data['actions'], rewards=data['rewards'])
+                experiences.append(experience)
+            self.step(experiences=experiences)
+        connection.close()
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -187,85 +194,79 @@ class DotaOptimizer(DotaOptimizerBase):
 
         logger.info('mean_reward={}'.format(mean_reward))
 
-        if USE_CHECKPOINTS:
-            # TODO(tzaman): should we write a model snapshot at episode 0?
-            self.writer.add_scalar('batch_size', batch_size, self.episode)
-            self.writer.add_scalar('steps per s', steps_per_s, self.episode)
-            self.writer.add_scalar('loss', loss, self.episode)
-            self.writer.add_scalar('mean_reward', mean_reward, self.episode)
-            for k, v in reward_counter.items():
-                self.writer.add_scalar('reward_{}'.format(k), v / batch_size, self.episode)
-            filename = MODEL_FILENAME_FMT % self.episode
-            rel_path = os.path.join(self.log_dir, filename)
-            torch.save(self.policy.state_dict(), rel_path)
+        # TODO(tzaman): should we write a model snapshot at episode 0?
+        self.writer.add_scalar('batch_size', batch_size, self.episode)
+        self.writer.add_scalar('steps per s', steps_per_s, self.episode)
+        self.writer.add_scalar('loss', loss, self.episode)
+        self.writer.add_scalar('mean_reward', mean_reward, self.episode)
+        for k, v in reward_counter.items():
+            self.writer.add_scalar('reward_{}'.format(k), v / batch_size, self.episode)
 
-            # Upload to GCP.
-            blob = bucket.blob(rel_path)
-            blob.upload_from_filename(filename=rel_path)  # Model
-            blob = bucket.blob(self.events_filename)
-            blob.upload_from_filename(filename=self.events_filename)  # Events file
+        # Upload events file.
+        blob = bucket.blob(self.events_filename)
+        blob.upload_from_filename(filename=self.events_filename)  # Events file
+
+        # Upload model.
+        self.upload_model()
+
+        # filename = MODEL_FILENAME_FMT % self.episode
+        # rel_path = os.path.join(self.log_dir, filename)
+        # torch.save(self.policy.state_dict(), rel_path)
+        # blob = bucket.blob(rel_path)
+        # blob.upload_from_filename(filename=rel_path)  # Model
+
 
         self.episode += 1
 
-    async def Rollout(self, stream):
-        # logger.info('::Rollout')
-        request = await stream.recv_message()
-        await stream.send_message(Empty2())
-
-        states = pickle.loads(request.states)
-        actions = pickle.loads(request.actions)
-        rewards = pickle.loads(request.rewards)
-
-        experience = Experience(
-            game_id=request.game_id, states=states, actions=actions, rewards=rewards)
-
-        await self.experience_queue.put(experience)
-
-    async def GetWeights(self, stream):
-        # logger.info('::GetWeights')
-        request = await stream.recv_message()
-        version = request.version
-
-        # Impossible to have a newer weight than the optimizer itself
-        assert version <= self.episode
-
-        if self.episode == version and version != 0:
-            # TODO(tzaman): version -1 should just always update weights
-            await stream.send_message(
-                Weights(
-                    status=Weights.Status.Value('UP_TO_DATE'),
-                    version=self.episode,
-                ))
-            return
-
-        state_dict = self.policy.state_dict()
-        state_dict_p = pickle.dumps(state_dict)
-
-        await stream.send_message(
-            Weights(
-                status=Weights.Status.Value('OK'),
-                version=self.episode,
-                data=state_dict_p,
+    def upload_model(self):
+        channel = grpc.insecure_channel('0.0.0.0:50052')
+        stub = ModelServiceStub(channel)
+        state_dict_pickled = pickle.dumps(self.policy.state_dict())
+        _ = stub.PutWeights(Weights(
+            version=self.episode,
+            data=state_dict_pickled,
+            log_dir=self.log_dir,
             ))
 
 
-async def serve(server, host, port):
-    logger.info('Serving on {}:{}'.format(host, port))
-    await server.start(host, port)
-    try:
-        await server.wait_closed()
-    except asyncio.CancelledError:
-        server.close()
-        await server.wait_closed()
+def init_distribution():
+    logger.info('init_distribution')
+    assert 'WORLD_SIZE' in os.environ
+    world_size = int(os.environ['WORLD_SIZE'])
+    if world_size == 1:
+        return
+
+    assert 'MASTER_ADDR' in os.environ
+    assert 'MASTER_PORT' in os.environ
+
+    # For the rank, we depend on the hostname's trailing ordinal index (StatefulSet)
+    hostname = os.environ['HOSTNAME']
+    rank = int(hostname.split('-')[-1])
+    
+    print('hostname={}, rank={}, world_size={}'.format(hostname, rank, world_size))
+    print('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
+
+    torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
 
 
-async def main():
-    server = Server([DotaOptimizer()], loop=asyncio.get_event_loop())
-    await serve(server, host='', port=50051)
+def main():
+    if torch.distributed.is_available():
+        init_distribution()
+    else:
+        logger.info('distribution unavailable')
+
+    dota_optimizer = DotaOptimizer()
+
+    # Upload initial model.
+    dota_optimizer.upload_model()
+
+    dota_optimizer.run()
+
+
 
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         pass

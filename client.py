@@ -15,23 +15,22 @@ from dotaservice.protos.dota_shared_enums_pb2 import DOTA_GAMEMODE_1V1MID
 from dotaservice.protos.DotaService_grpc import DotaServiceStub
 from dotaservice.protos.DotaService_pb2 import Actions
 from dotaservice.protos.DotaService_pb2 import Empty
-from dotaservice.protos.DotaService_pb2 import HostMode
-from dotaservice.protos.DotaService_pb2 import Status
 from dotaservice.protos.DotaService_pb2 import GameConfig
+from dotaservice.protos.DotaService_pb2 import HostMode
 from dotaservice.protos.DotaService_pb2 import ObserveConfig
+from dotaservice.protos.DotaService_pb2 import Status
 from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
 from grpclib.client import Channel
 from torch.distributions import Categorical
+import grpc
 import numpy as np
+import pika
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from protos.DotaOptimizer_pb2 import RolloutData
-from protos.DotaOptimizer_pb2 import WeightQuery
-from protos.DotaOptimizer_pb2 import Weights
-from protos.DotaOptimizer_grpc import DotaOptimizerStub
+
 from policy import Policy
 
 logger = logging.getLogger(__name__)
@@ -156,10 +155,19 @@ optimizer = optim.SGD(policy.parameters(), lr=LEARNING_RATE)
 weight_version = 0
 
 
-async def get_latest_weights(optimizer_service):
+from protos.ModelService_pb2_grpc import ModelServiceStub
+from protos.ModelService_pb2 import WeightQuery
+from protos.ModelService_pb2 import Weights
+
+
+async def get_latest_weights():
     global weight_version
     logger.info('get_latest_weights')
-    response = await optimizer_service.GetWeights(WeightQuery(version=weight_version))
+    # response = await optimizer_service.GetWeights(WeightQuery(version=weight_version))
+
+    channel = grpc.insecure_channel('0.0.0.0:50052')
+    stub = ModelServiceStub(channel)
+    response = stub.GetWeights(WeightQuery(version=weight_version))
 
     if response.status == Weights.Status.Value('UP_TO_DATE'):
         # No need to update the weights.
@@ -197,7 +205,7 @@ def get_mid_tower(state, team_id):
 
 
 class Player:
-    def __init__(self, game_id, player_id, team_id, optimizer_service):
+    def __init__(self, game_id, player_id, team_id):
         self.player_id = player_id
         self.policy_inputs = []
         self.action_dicts = []
@@ -205,7 +213,6 @@ class Player:
         self.hidden = None
         self.game_id = game_id
         self.team_id = team_id
-        self.optimizer_service = optimizer_service
 
     def print_reward_summary(self):
         reward_counter = Counter()
@@ -217,6 +224,26 @@ class Player:
         logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
             self.player_id, reward_sum, pformat(reward_counter)))
 
+    def _send_rmq(self):
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        channel = connection.channel()
+        channel.queue_declare(queue='hello')
+        data = pickle.dumps({
+            'game_id': self.game_id,
+            'team_id': self.team_id,
+            'player_id': self.player_id,
+            'states': self.policy_inputs,
+            'actions': self.action_dicts,
+            'rewards': self.rewards,
+        })
+        channel.basic_publish(exchange='', routing_key='hello', body=data,
+            properties=pika.BasicProperties(
+                delivery_mode = 2, # make message persistent
+            )
+        )
+        connection.close()
+
+
     async def rollout(self):
         logger.info('Player {} rollout.'.format(self.player_id))
 
@@ -226,15 +253,7 @@ class Player:
 
         self.print_reward_summary()
 
-        _ = await self.optimizer_service.Rollout(
-            RolloutData(
-                game_id=self.game_id,
-                team_id=self.team_id,
-                player_id=self.player_id,
-                states=pickle.dumps(self.policy_inputs),
-                actions=pickle.dumps(self.action_dicts),
-                rewards=pickle.dumps(self.rewards),
-            ))
+        self._send_rmq()
 
         # Reset states.
         self.policy_inputs = []
@@ -387,10 +406,9 @@ class Game:
     ENV_RETRY_DELAY = 15
     EXCEPTION_RETRIES = 10
 
-    def __init__(self, config, dota_service, optimizer_service):
+    def __init__(self, config, dota_service):
         self.config = config
         self.dota_service = dota_service
-        self.optimizer_service = optimizer_service
         self.game_id = 'my_game_id'
 
     async def play(self):
@@ -401,14 +419,12 @@ class Game:
             Player(
                 game_id=self.game_id,
                 player_id=0,
-                team_id=TEAM_RADIANT,
-                optimizer_service=self.optimizer_service),
+                team_id=TEAM_RADIANT),
             TEAM_DIRE:
             Player(
                 game_id=self.game_id,
                 player_id=5,
-                team_id=TEAM_DIRE,
-                optimizer_service=self.optimizer_service),
+                team_id=TEAM_DIRE),
         }
 
         response = await asyncio.wait_for(self.dota_service.reset(self.config), timeout=120)
@@ -452,7 +468,7 @@ class Game:
                 for player in players.values():
                     await player.rollout()
 
-                await get_latest_weights(optimizer_service=self.optimizer_service)
+                await get_latest_weights()
             if done:
                 break
 
@@ -468,10 +484,6 @@ class Game:
 
 async def main():
 
-    # Connect to client
-    channel_optimizer = Channel(OPTIMIZER_HOST, OPTIMIZER_PORT, loop=asyncio.get_event_loop())
-    optimizer_service = DotaOptimizerStub(channel_optimizer)
-
     # Connect to optimizer
     channel_dota = Channel(DOTASERVICE_HOST, DOTASERVICE_PORT, loop=asyncio.get_event_loop())
     dota_service = DotaServiceStub(channel_dota)
@@ -483,15 +495,14 @@ async def main():
         game_mode=DOTA_GAMEMODE_1V1MID,
     )
 
-    game = Game(config=config, dota_service=dota_service, optimizer_service=optimizer_service)
+    game = Game(config=config, dota_service=dota_service)
 
-    await get_latest_weights(optimizer_service=optimizer_service)
+    await get_latest_weights()
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
         await game.play()
 
-    channel_optimizer.close()
     channel_dota.close()
 
 
