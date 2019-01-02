@@ -28,7 +28,6 @@ torch.manual_seed(7)
 eps = np.finfo(np.float32).eps.item()
 
 LEARNING_RATE = 1e-4
-MIN_BATCH_SIZE = 4
 
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
@@ -60,10 +59,12 @@ class DotaOptimizer():
     EXPERIENCE_QUEUE_NAME = 'experience'
     MODEL_EXCHANGE_NAME = 'model'
 
-    def __init__(self, rmq_host, rmq_port):
+    def __init__(self, rmq_host, rmq_port, batch_size):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
+        self.batch_size = batch_size
+
         self.policy = Policy()
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
         self.time_last_step = time.time()
@@ -79,7 +80,7 @@ class DotaOptimizer():
 
         self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
         self.experience_channel = self.rmq_connection.channel()
-        self.experience_channel.basic_qos(prefetch_count=MIN_BATCH_SIZE)
+        self.experience_channel.basic_qos(prefetch_count=self.batch_size)
         self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
         self.model_exchange = self.rmq_connection.channel()
         self.model_exchange.exchange_declare(
@@ -146,7 +147,7 @@ class DotaOptimizer():
     def run(self):
         while True:
             experiences = []
-            for _ in range(MIN_BATCH_SIZE):
+            for _ in range(self.batch_size):
                 method_frame, properties, body = next(self.experience_channel.consume(
                     queue=self.EXPERIENCE_QUEUE_NAME,
                     no_ack=True,
@@ -171,7 +172,6 @@ class DotaOptimizer():
         all_rewards = []
         all_weight_ages = []
 
-        batch_size = len(experiences)
         # Loop over each experience
         for experience in experiences:
             log_prob_sum = self.process_rollout(
@@ -196,7 +196,7 @@ class DotaOptimizer():
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
-        avg_weight_age = float(sum(all_weight_ages)) / batch_size
+        avg_weight_age = sum(all_weight_ages) / self.batch_size
 
         logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}'.format(loss, steps_per_s, avg_weight_age))
 
@@ -207,18 +207,17 @@ class DotaOptimizer():
         reward_counter = dict(reward_counter)
 
         reward_sum = sum(reward_counter.values())
-        mean_reward = reward_sum / batch_size
+        mean_reward = reward_sum / self.batch_size
 
         logger.info('mean_reward={}'.format(mean_reward))
 
         if USE_CHECKPOINTS:
-            self.writer.add_scalar('batch_size', batch_size, self.episode)
             self.writer.add_scalar('steps per s', steps_per_s, self.episode)
             self.writer.add_scalar('avg weight age', avg_weight_age, self.episode)
             self.writer.add_scalar('loss', loss, self.episode)
             self.writer.add_scalar('mean_reward', mean_reward, self.episode)
             for k, v in reward_counter.items():
-                self.writer.add_scalar('reward_{}'.format(k), v / batch_size, self.episode)
+                self.writer.add_scalar('reward_{}'.format(k), v / self.batch_size, self.episode)
             # Upload events to GCS
             blob = bucket.blob(self.events_filename)
             blob.upload_from_filename(filename=self.events_filename)
@@ -277,14 +276,14 @@ def init_distribution():
     torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
 
 
-def main(rmq_host, rmq_port):
-    print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
+def main(rmq_host, rmq_port, batch_size):
+    print('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
     if torch.distributed.is_available():
         init_distribution()
     else:
         logger.info('distribution unavailable')
 
-    dota_optimizer = DotaOptimizer(rmq_host, rmq_port)
+    dota_optimizer = DotaOptimizer(rmq_host=rmq_host, rmq_port=rmq_port, batch_size=batch_size)
 
     # Upload initial model.
     dota_optimizer.upload_model()
@@ -295,10 +294,11 @@ def main(rmq_host, rmq_port):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
-    parser.add_argument("--port", type=str, help="mq port", default=5672)
+    parser.add_argument("--port", type=int, help="mq port", default=5672)
+    parser.add_argument("--batch-size", type=int, help="batch size", default=8)
     args = parser.parse_args()
 
     try:
-        main(rmq_host=args.ip, rmq_port=args.port)
+        main(rmq_host=args.ip, rmq_port=args.port, batch_size=args.batch_size)
     except KeyboardInterrupt:
         pass
