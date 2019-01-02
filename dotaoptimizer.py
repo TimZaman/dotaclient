@@ -69,7 +69,7 @@ class DotaOptimizer():
         self.time_last_step = time.time()
 
         pretrained_model = PRETRAINED_MODEL
-        if pretrained_model:
+        if pretrained_model is not None:
             self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
 
         self.episode = START_EPISODE
@@ -79,6 +79,7 @@ class DotaOptimizer():
 
         self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
         self.experience_channel = self.rmq_connection.channel()
+        self.experience_channel.basic_qos(prefetch_count=MIN_BATCH_SIZE)
         self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
         self.model_exchange = self.rmq_connection.channel()
         self.model_exchange.exchange_declare(

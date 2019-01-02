@@ -232,9 +232,10 @@ class Player:
             'weight_version': policy.weight_version,
         })
         self.experience_channel.basic_publish(exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data,
-            properties=pika.BasicProperties(
-                delivery_mode = 2, # make message persistent
-            )
+            # I don't think we need to make messages persistent (saved to disk)
+            # properties=pika.BasicProperties(
+            #     delivery_mode = 2, # make message persistent
+            # )
         )
 
 
