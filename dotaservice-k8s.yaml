@@ -42,7 +42,7 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: rmq
-        image: gcr.io/dotaservice-225201/rmq:3.7-plugins
+        image: gcr.io/dotaservice-225201/rmq:3.7-plugins-a
         ports:
           - name: http
             protocol: TCP
@@ -107,6 +107,8 @@ spec:
         - dotaoptimizer.py
         - --ip
         - rmq.default.svc.cluster.local
+        - --batch-size
+        - "32"
         volumeMounts:
         - name: gcs-secret
           mountPath: /etc/gcp
@@ -134,7 +136,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 1
+  replicas: 12
   selector:
     matchLabels:
       app: dotaservice

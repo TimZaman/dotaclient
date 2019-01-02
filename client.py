@@ -163,7 +163,7 @@ async def model_callback(channel, body, envelope, properties):
 async def setup_model_cb(host, port):
     logger.info('setup_model_cb(host={}, port={})'.format(host, port))
     try:
-        transport, protocol = await aioamqp.connect(host=host, port=port)
+        transport, protocol = await aioamqp.connect(host=host, port=port, heartbeat=300)
     except aioamqp.AmqpClosedConnection:
         logger.info("closed rmq connections")
         return
@@ -484,7 +484,7 @@ class Game:
 async def main(rmq_host, rmq_port):
     print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
-    rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
+    rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
     experience_channel = rmq_connection.channel()
     experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 

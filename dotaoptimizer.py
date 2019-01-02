@@ -78,7 +78,11 @@ class DotaOptimizer():
         self.writer = SummaryWriter()
         logger.info('Checkpointing to: {}'.format(self.log_dir))
 
-        self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
+        self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
+            host=rmq_host,
+            port=rmq_port,
+            heartbeat=300,
+            ))
         self.experience_channel = self.rmq_connection.channel()
         self.experience_channel.basic_qos(prefetch_count=self.batch_size)
         self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
@@ -107,10 +111,6 @@ class DotaOptimizer():
         return discounted_rewards
 
     def finish_episode(self, rewards, log_probs):
-        # print('::finish_episode')
-        # print('rewards=\n{}'.format(rewards))
-        # print('log_probs=\n{}'.format(log_probs))
-
         rewards = torch.tensor(rewards)
         rewards = (rewards - rewards.mean()) / (rewards.std() + eps)
 
@@ -127,9 +127,7 @@ class DotaOptimizer():
         return loss
 
     def process_rollout(self, states, actions):
-        # print('::process_rollout')
         hidden = None
-        # all_action_probs = []
         all_rewards = []
         log_prob_sum = []
 
@@ -174,6 +172,7 @@ class DotaOptimizer():
 
         # Loop over each experience
         for experience in experiences:
+            self.rmq_connection.process_data_events()  # Process RMQ heartbeats.
             log_prob_sum = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
@@ -270,14 +269,14 @@ def init_distribution():
     hostname = os.environ['HOSTNAME']
     rank = int(hostname.split('-')[-1])
     
-    print('hostname={}, rank={}, world_size={}'.format(hostname, rank, world_size))
-    print('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
+    logger.info('hostname={}, rank={}, world_size={}'.format(hostname, rank, world_size))
+    logger.info('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
 
     torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
 
 
 def main(rmq_host, rmq_port, batch_size):
-    print('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
+    logger.info('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
     if torch.distributed.is_available():
         init_distribution()
     else:
