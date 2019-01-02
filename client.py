@@ -150,14 +150,17 @@ def get_reward(prev_obs, obs, player_id):
 
 policy = Policy()
 
+weight_received_event = None
 
 async def model_callback(channel, body, envelope, properties):
     # TODO(tzaman): add a future so we can wait for first weights
     version = properties.headers['version']
     logger.info("Received new model: version={}, size={}b".format(version, len(body)))
-    policy.load_state_dict(torch.load(io.BytesIO(body)), strict=True)
+    state_dict = torch.load(io.BytesIO(body))
+    policy.load_state_dict(state_dict, strict=True)
     policy.weight_version = version
     logger.info('Updated weights to version {}'.format(version))
+    weight_received_event.set()
 
 
 async def setup_model_cb(host, port):
@@ -488,7 +491,14 @@ async def main(rmq_host, rmq_port):
     experience_channel = rmq_connection.channel()
     experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 
+    global weight_received_event  # HACK
+    weight_received_event = asyncio.Event(loop=asyncio.get_event_loop())
+
+    # Set up the model callback.
     await setup_model_cb(host=rmq_host, port=rmq_port)
+
+    # Wait for the first model weight to come in.
+    await weight_received_event.wait()
 
     # Connect to dota
     channel_dota = Channel(DOTASERVICE_HOST, DOTASERVICE_PORT, loop=asyncio.get_event_loop())

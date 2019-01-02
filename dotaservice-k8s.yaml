@@ -72,19 +72,21 @@ spec:
     run: optimizer
 ---
 apiVersion: apps/v1
-kind: Deployment  # TODO(tzaman): make a StatefulSet
+kind: StatefulSet
 metadata:
   name: optimizer
 spec:
   selector:
     matchLabels:
       run: optimizer
-  replicas: 1
+  serviceName: "optimizer"
+  replicas: 2
   template:
     metadata:
       labels:
         run: optimizer
     spec:
+      terminationGracePeriodSeconds: 30
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -108,7 +110,7 @@ spec:
         - --ip
         - rmq.default.svc.cluster.local
         - --batch-size
-        - "32"
+        - "16"
         volumeMounts:
         - name: gcs-secret
           mountPath: /etc/gcp
@@ -117,11 +119,11 @@ spec:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /etc/gcp/sa_credentials.json
         - name: MASTER_ADDR
-          value: "pytorch-0.dist.default.svc.cluster.local"
+          value: "optimizer-0.optimizer.default.svc.cluster.local"
         - name: MASTER_PORT
           value: "29500"
         - name: WORLD_SIZE
-          value: "1" 
+          value: "2" 
         ports:
         - name: gloo
           containerPort: 29500

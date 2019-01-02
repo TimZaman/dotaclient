@@ -54,7 +54,7 @@ class Experience:
         self.weight_version = weight_version
 
 
-class DotaOptimizer():
+class DotaOptimizer:
 
     EXPERIENCE_QUEUE_NAME = 'experience'
     MODEL_EXCHANGE_NAME = 'model'
@@ -66,6 +66,8 @@ class DotaOptimizer():
         self.batch_size = batch_size
 
         self.policy = Policy()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            self.policy = torch.nn.parallel.DistributedDataParallelCPU(self.policy)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
         self.time_last_step = time.time()
 
@@ -121,7 +123,6 @@ class DotaOptimizer():
         self.optimizer.zero_grad()
         loss = torch.cat(loss).mean()
         loss.backward()
-        self.policy.maybe_average_gradients()
         self.optimizer.step()
 
         return loss
@@ -134,7 +135,8 @@ class DotaOptimizer():
         # Loop over each step.
         for policy_input, action_dict in zip(states, actions):
             head_prob_dict, hidden = self.policy(**policy_input, hidden=hidden)
-            action_probs = self.policy.action_probs(
+
+            action_probs = self.policy.module.action_probs(  #HACK!
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
             )
@@ -192,6 +194,8 @@ class DotaOptimizer():
 
         loss = self.finish_episode(rewards=all_discounted_rewards, log_probs=all_logprobs)
 
+        self.episode += 1
+
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
@@ -223,7 +227,6 @@ class DotaOptimizer():
 
             self.upload_model()
 
-        self.episode += 1
 
 
     def upload_model(self):
@@ -236,7 +239,14 @@ class DotaOptimizer():
 
         # Serialize the model.
         buffer = io.BytesIO()
-        torch.save(self.policy.state_dict(), buffer)
+        state_dict = self.policy.state_dict()
+        # Potentially remove the "module." suffix induced by DataParallel wrapper.
+        for key in list(state_dict.keys()):
+            if key[:7] == 'module.':
+                val = state_dict[key]
+                del state_dict[key]
+                state_dict[key[7:]] = val
+        torch.save(state_dict, buffer)
 
         # Write model to file.
         with open(rel_path,'wb') as f:
@@ -268,7 +278,10 @@ def init_distribution():
     # For the rank, we depend on the hostname's trailing ordinal index (StatefulSet)
     hostname = os.environ['HOSTNAME']
     rank = int(hostname.split('-')[-1])
-    
+
+    if rank != 0:
+        USE_CHECKPOINTS = False
+
     logger.info('hostname={}, rank={}, world_size={}'.format(hostname, rank, world_size))
     logger.info('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
 

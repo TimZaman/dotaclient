@@ -51,32 +51,6 @@ class Policy(nn.Module):
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
         self.affine_unit_attention = nn.Linear(128, 128)
 
-    def maybe_average_gradients(self):
-        if not torch.distributed.is_available():
-            return
-
-        if not torch.distributed.is_initialized():
-           return 
-
-        print('Policy::maybe_average_gradients')
-        size = float(torch.distributed.get_world_size())
-        for param in self.parameters():
-            torch.distributed.all_reduce(param.grad.data, op=torch.distributed.reduce_op.SUM)
-            param.grad.data /= size
-
-    def get_grad_dict(self):
-        logger.debug('Policy::get_grad_dict()')
-        grad_dict = {}
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                grad_dict[name] = param.grad
-        return grad_dict
-
-    def set_grad_dict(self, grad_dict):
-        logger.debug('Policy::set_grad_dict()')
-        for name, param in self.named_parameters():
-            param.grad = grad_dict[name]
-
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, hidden):
         logger.info('policy(inputs=\n{}'.format(
             pformat({'env': env,
