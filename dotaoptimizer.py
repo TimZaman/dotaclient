@@ -228,7 +228,7 @@ class DotaOptimizer():
 
 
     def upload_model(self):
-        if torch.distributed.is_available() and torch.distributed.get_rank() != 0:
+        if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
             # Only rank 0 uploads the model.
             return
 
@@ -260,7 +260,7 @@ def init_distribution():
     logger.info('init_distribution')
     assert 'WORLD_SIZE' in os.environ
     world_size = int(os.environ['WORLD_SIZE'])
-    if world_size == 1:
+    if world_size < 2:
         return
 
     assert 'MASTER_ADDR' in os.environ

@@ -114,12 +114,18 @@ spec:
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /etc/gcp/sa_credentials.json
+        - name: MASTER_ADDR
+          value: "pytorch-0.dist.default.svc.cluster.local"
+        - name: MASTER_PORT
+          value: "29500"
+        - name: WORLD_SIZE
+          value: "1" 
         ports:
         - name: gloo
           containerPort: 29500
         resources:
           requests:
-            cpu: 600m
+            cpu: 400m
 ---
 apiVersion: apps/v1
 kind: Deployment
