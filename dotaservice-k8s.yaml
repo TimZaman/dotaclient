@@ -1,21 +1,78 @@
 apiVersion: v1
-kind: Service  # optimizer.default.svc.cluster.local
+kind: Service  # rmq.default.svc.cluster.local
 metadata:
-  name: optimizer
+  name: rmq
   namespace: default
   labels:
-    run: optimizer
+    run: rmq
 spec:
   type: ClusterIP
   ports:
-  - name: grpc
-    port: 50051
-    targetPort: 50051
+   - name: http
+     protocol: TCP
+     port: 15672
+     targetPort: 15672
+   - name: amqp
+     protocol: TCP
+     port: 5672
+     targetPort: 5672
+  selector:
+    run: rmq
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rmq
+spec:
+  selector:
+    matchLabels:
+      run: rmq
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        run: rmq
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-preemptible
+                operator: DoesNotExist
+      containers:
+      - name: rmq
+        image: gcr.io/dotaservice-225201/rmq:3.7-plugins
+        ports:
+          - name: http
+            protocol: TCP
+            containerPort: 15672
+          - name: amqp
+            protocol: TCP
+            containerPort: 5672
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1024Mi
+---
+# Preferably use index job, (aka Stateful Job): track:https://github.com/kubernetes/kubernetes/issues/14188
+# StatefulSets currently require a Headless Service to be responsible for the network identity of the Pods
+apiVersion: v1
+kind: Service  # optimizer.default.svc.cluster.local
+metadata:
+  name: optimizer
+  labels:
+    run: optimizer
+spec:
+  ports:
+  - port: 29500
+    name: gloo
+  clusterIP: None
   selector:
     run: optimizer
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: Deployment  # TODO(tzaman): make a StatefulSet
 metadata:
   name: optimizer
 spec:
@@ -45,7 +102,11 @@ spec:
       containers:
       - name: optimizer
         image: gcr.io/dotaservice-225201/dotaclient:latest
-        command: ["python3.7", "dotaoptimizer.py"]
+        command:
+        - python3.7
+        - dotaoptimizer.py
+        - --ip
+        - rmq.default.svc.cluster.local
         volumeMounts:
         - name: gcs-secret
           mountPath: /etc/gcp
@@ -54,11 +115,11 @@ spec:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /etc/gcp/sa_credentials.json
         ports:
-        - name: grpc
-          containerPort: 50051
+        - name: gloo
+          containerPort: 29500
         resources:
           requests:
-            cpu: 400m  # ~80m per dotaservice
+            cpu: 600m
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -67,7 +128,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 12
+  replicas: 1
   selector:
     matchLabels:
       app: dotaservice
@@ -85,7 +146,7 @@ spec:
         - python3.7
         - client.py
         - --ip
-        - optimizer.default.svc.cluster.local
+        - rmq.default.svc.cluster.local
         resources:
           requests:
             cpu: 100m
@@ -96,6 +157,3 @@ spec:
         resources:
           requests:
             cpu: 500m
-
-# TODO(tzaman): add rabbitmq for experience broker
-# docker run 15672:15672 -p 5672:5672 rabbitmq:3.7.8-management-alpine

@@ -1,6 +1,7 @@
 from collections import Counter
 from pprint import pprint, pformat
-import asyncio
+import argparse
+import io
 import logging
 import os
 import pickle
@@ -8,17 +9,11 @@ import pika
 import time
 
 from google.cloud import storage
-from grpclib.server import Server
-import grpc
 from tensorboardX import SummaryWriter
 import numpy as np
 import torch
-import torch.optim as optim
 
 from policy import Policy
-
-from protos.ModelService_pb2_grpc import ModelServiceStub
-from protos.ModelService_pb2 import Weights
 
 
 logger = logging.getLogger(__name__)
@@ -38,11 +33,11 @@ MIN_BATCH_SIZE = 4
 client = storage.Client()
 bucket = client.get_bucket('dotaservice')
 
-# USE_CHECKPOINTS = False
-# MODEL_FILENAME_FMT = "model_%09d.pt"
+USE_CHECKPOINTS = True
+MODEL_FILENAME_FMT = "model_%09d.pt"
 
 START_EPISODE = 0
-# PRETRAINED_MODEL = None
+PRETRAINED_MODEL = None
 
 # START_EPISODE = 647
 # PRETRAINED_MODEL = 'runs/Dec30_22-46-22_optimizer-55f6d8fd9c-2c788/' + MODEL_FILENAME_FMT % START_EPISODE
@@ -52,30 +47,45 @@ START_EPISODE = 0
 
 
 class Experience:
-    def __init__(self, game_id, states, actions, rewards):
+    def __init__(self, game_id, states, actions, rewards, weight_version):
         self.game_id = game_id
         self.states = states
         self.actions = actions
         self.rewards = rewards
+        self.weight_version = weight_version
 
 
 class DotaOptimizer():
-    def __init__(self):
+
+    EXPERIENCE_QUEUE_NAME = 'experience'
+    MODEL_EXCHANGE_NAME = 'model'
+
+    def __init__(self, rmq_host, rmq_port):
         super().__init__()
+        self.rmq_host = rmq_host
+        self.rmq_port = rmq_port
         self.policy = Policy()
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
-        self.experience_queue = asyncio.Queue(loop=asyncio.get_event_loop())
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
         self.time_last_step = time.time()
 
-        # pretrained_model = PRETRAINED_MODEL
-        # if pretrained_model:
-        #     self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
+        pretrained_model = PRETRAINED_MODEL
+        if pretrained_model:
+            self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
 
         self.episode = START_EPISODE
 
         self.writer = SummaryWriter()
         logger.info('Checkpointing to: {}'.format(self.log_dir))
 
+        self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
+        self.experience_channel = self.rmq_connection.channel()
+        self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
+        self.model_exchange = self.rmq_connection.channel()
+        self.model_exchange.exchange_declare(
+            exchange=self.MODEL_EXCHANGE_NAME,
+            exchange_type='x-recent-history',
+            arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
+            )
 
     @property
     def events_filename(self):
@@ -132,21 +142,24 @@ class DotaOptimizer():
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
-
-
     def run(self):
-        connection = pika.BlockingConnection(pika.ConnectionParameters('127.0.0.1'))
-        channel = connection.channel()
         while True:
             experiences = []
             for _ in range(MIN_BATCH_SIZE):
-                method_frame, properties, body = next(channel.consume(queue='hello', no_ack=True))
+                method_frame, properties, body = next(self.experience_channel.consume(
+                    queue=self.EXPERIENCE_QUEUE_NAME,
+                    no_ack=True,
+                    ))
                 data = pickle.loads(body)
                 experience = Experience(
-                    game_id=data['game_id'], states=data['states'], actions=data['actions'], rewards=data['rewards'])
+                    game_id=data['game_id'],
+                    states=data['states'],
+                    actions=data['actions'],
+                    rewards=data['rewards'],
+                    weight_version=data['weight_version'],
+                    )
                 experiences.append(experience)
             self.step(experiences=experiences)
-        connection.close()
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -155,6 +168,7 @@ class DotaOptimizer():
         all_discounted_rewards = []
         all_logprobs = []
         all_rewards = []
+        all_weight_ages = []
 
         batch_size = len(experiences)
         # Loop over each experience
@@ -172,6 +186,7 @@ class DotaOptimizer():
 
             all_discounted_rewards.extend(discounted_rewards)
             all_logprobs.extend(log_prob_sum)
+            all_weight_ages.append(self.episode - experience.weight_version)
 
         n_steps = len(all_discounted_rewards)
 
@@ -180,8 +195,9 @@ class DotaOptimizer():
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
-        logger.info('loss={}'.format(loss))
-        logger.info('steps_per_s={}'.format(steps_per_s))
+        avg_weight_age = float(sum(all_weight_ages)) / batch_size
+
+        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}'.format(loss, steps_per_s, avg_weight_age))
 
         reward_counter = Counter()
         for b in all_rewards:  # Jobs in a batch.
@@ -194,39 +210,50 @@ class DotaOptimizer():
 
         logger.info('mean_reward={}'.format(mean_reward))
 
-        # TODO(tzaman): should we write a model snapshot at episode 0?
-        self.writer.add_scalar('batch_size', batch_size, self.episode)
-        self.writer.add_scalar('steps per s', steps_per_s, self.episode)
-        self.writer.add_scalar('loss', loss, self.episode)
-        self.writer.add_scalar('mean_reward', mean_reward, self.episode)
-        for k, v in reward_counter.items():
-            self.writer.add_scalar('reward_{}'.format(k), v / batch_size, self.episode)
+        if USE_CHECKPOINTS:
+            self.writer.add_scalar('batch_size', batch_size, self.episode)
+            self.writer.add_scalar('steps per s', steps_per_s, self.episode)
+            self.writer.add_scalar('avg weight age', avg_weight_age, self.episode)
+            self.writer.add_scalar('loss', loss, self.episode)
+            self.writer.add_scalar('mean_reward', mean_reward, self.episode)
+            for k, v in reward_counter.items():
+                self.writer.add_scalar('reward_{}'.format(k), v / batch_size, self.episode)
+            # Upload events to GCS
+            blob = bucket.blob(self.events_filename)
+            blob.upload_from_filename(filename=self.events_filename)
 
-        # Upload events file.
-        blob = bucket.blob(self.events_filename)
-        blob.upload_from_filename(filename=self.events_filename)  # Events file
-
-        # Upload model.
-        self.upload_model()
-
-        # filename = MODEL_FILENAME_FMT % self.episode
-        # rel_path = os.path.join(self.log_dir, filename)
-        # torch.save(self.policy.state_dict(), rel_path)
-        # blob = bucket.blob(rel_path)
-        # blob.upload_from_filename(filename=rel_path)  # Model
-
+            self.upload_model()
 
         self.episode += 1
 
+
     def upload_model(self):
-        channel = grpc.insecure_channel('0.0.0.0:50052')
-        stub = ModelServiceStub(channel)
-        state_dict_pickled = pickle.dumps(self.policy.state_dict())
-        _ = stub.PutWeights(Weights(
-            version=self.episode,
-            data=state_dict_pickled,
-            log_dir=self.log_dir,
-            ))
+        if torch.distributed.is_available() and torch.distributed.get_rank() != 0:
+            # Only rank 0 uploads the model.
+            return
+
+        filename = MODEL_FILENAME_FMT % self.episode
+        rel_path = os.path.join(self.log_dir, filename)
+
+        # Serialize the model.
+        buffer = io.BytesIO()
+        torch.save(self.policy.state_dict(), buffer)
+
+        # Write model to file.
+        with open(rel_path,'wb') as f:
+            f.write(buffer.read())
+
+        # Send to exchange.
+        self.model_exchange.basic_publish(
+            exchange=self.MODEL_EXCHANGE_NAME,
+            routing_key='',
+            body=buffer.getbuffer(),
+            properties=pika.BasicProperties(headers={'version': self.episode}),
+            )
+
+        # Upload to GCP.
+        blob = bucket.blob(rel_path)
+        blob.upload_from_filename(filename=rel_path)  # Model
 
 
 def init_distribution():
@@ -249,13 +276,14 @@ def init_distribution():
     torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
 
 
-def main():
+def main(rmq_host, rmq_port):
+    print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     if torch.distributed.is_available():
         init_distribution()
     else:
         logger.info('distribution unavailable')
 
-    dota_optimizer = DotaOptimizer()
+    dota_optimizer = DotaOptimizer(rmq_host, rmq_port)
 
     # Upload initial model.
     dota_optimizer.upload_model()
@@ -263,10 +291,13 @@ def main():
     dota_optimizer.run()
 
 
-
-
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
+    parser.add_argument("--port", type=str, help="mq port", default=5672)
+    args = parser.parse_args()
+
     try:
-        main()
+        main(rmq_host=args.ip, rmq_port=args.port)
     except KeyboardInterrupt:
         pass

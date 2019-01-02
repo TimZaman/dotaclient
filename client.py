@@ -2,6 +2,7 @@ from collections import Counter
 from pprint import pprint, pformat
 import argparse
 import asyncio
+import io
 import logging
 import math
 import os
@@ -21,15 +22,12 @@ from dotaservice.protos.DotaService_pb2 import ObserveConfig
 from dotaservice.protos.DotaService_pb2 import Status
 from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
 from grpclib.client import Channel
-from torch.distributions import Categorical
+import aioamqp
 import grpc
 import numpy as np
-import pika
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 
+import pika # remove in favour of aioamqp
 
 from policy import Policy
 
@@ -56,14 +54,16 @@ MAX_STEPS = 10000
 
 HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
 
-OPTIMIZER_HOST = '127.0.0.1'
-OPTIMIZER_PORT = 50051
-
 DOTASERVICE_HOST = '127.0.0.1'
 DOTASERVICE_PORT = 13337
 
 LEARNING_RATE = 1e-4
 eps = np.finfo(np.float32).eps.item()
+
+# RMQ
+EXPERIENCE_QUEUE_NAME = 'experience'
+MODEL_EXCHANGE_NAME = 'model'
+
 
 # Derivates.
 DELAY_ENUM_TO_STEP = math.floor(TICKS_PER_OBSERVATION / N_DELAY_ENUMS)
@@ -148,36 +148,31 @@ def get_reward(prev_obs, obs, player_id):
 
     return reward
 
-
 policy = Policy()
-optimizer = optim.SGD(policy.parameters(), lr=LEARNING_RATE)
-
-weight_version = 0
 
 
-from protos.ModelService_pb2_grpc import ModelServiceStub
-from protos.ModelService_pb2 import WeightQuery
-from protos.ModelService_pb2 import Weights
+async def model_callback(channel, body, envelope, properties):
+    # TODO(tzaman): add a future so we can wait for first weights
+    version = properties.headers['version']
+    logger.info("Received new model: version={}, size={}b".format(version, len(body)))
+    policy.load_state_dict(torch.load(io.BytesIO(body)), strict=True)
+    policy.weight_version = version
+    logger.info('Updated weights to version {}'.format(version))
 
 
-async def get_latest_weights():
-    global weight_version
-    logger.info('get_latest_weights')
-    # response = await optimizer_service.GetWeights(WeightQuery(version=weight_version))
-
-    channel = grpc.insecure_channel('0.0.0.0:50052')
-    stub = ModelServiceStub(channel)
-    response = stub.GetWeights(WeightQuery(version=weight_version))
-
-    if response.status == Weights.Status.Value('UP_TO_DATE'):
-        # No need to update the weights.
-        logger.info('Weights are up-to-date.')
+async def setup_model_cb(host, port):
+    logger.info('setup_model_cb(host={}, port={})'.format(host, port))
+    try:
+        transport, protocol = await aioamqp.connect(host=host, port=port)
+    except aioamqp.AmqpClosedConnection:
+        logger.info("closed rmq connections")
         return
-    weight_version = response.version
-    state_dict_p = response.data
-    state_dict = pickle.loads(state_dict_p)
-    policy.load_state_dict(state_dict, strict=True)
-    logger.info('Updated weights to version {}'.format(weight_version))
+    channel = await protocol.channel()
+    await channel.exchange(exchange_name=MODEL_EXCHANGE_NAME, type_name='x-recent-history')
+    result = await channel.queue(queue_name='', exclusive=True)
+    queue_name = result['queue']
+    await channel.queue_bind(exchange_name=MODEL_EXCHANGE_NAME, queue_name=queue_name, routing_key='')
+    await channel.basic_consume(model_callback, queue_name=queue_name, no_ack=True)
 
 
 def get_player(state, player_id):
@@ -205,7 +200,7 @@ def get_mid_tower(state, team_id):
 
 
 class Player:
-    def __init__(self, game_id, player_id, team_id):
+    def __init__(self, game_id, player_id, team_id, experience_channel):
         self.player_id = player_id
         self.policy_inputs = []
         self.action_dicts = []
@@ -213,6 +208,7 @@ class Player:
         self.hidden = None
         self.game_id = game_id
         self.team_id = team_id
+        self.experience_channel = experience_channel
 
     def print_reward_summary(self):
         reward_counter = Counter()
@@ -224,10 +220,8 @@ class Player:
         logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
             self.player_id, reward_sum, pformat(reward_counter)))
 
-    def _send_rmq(self):
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        channel = connection.channel()
-        channel.queue_declare(queue='hello')
+    def _send_experience_rmq(self):
+        logger.debug('_send_experience_rmq')
         data = pickle.dumps({
             'game_id': self.game_id,
             'team_id': self.team_id,
@@ -235,13 +229,13 @@ class Player:
             'states': self.policy_inputs,
             'actions': self.action_dicts,
             'rewards': self.rewards,
+            'weight_version': policy.weight_version,
         })
-        channel.basic_publish(exchange='', routing_key='hello', body=data,
+        self.experience_channel.basic_publish(exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data,
             properties=pika.BasicProperties(
                 delivery_mode = 2, # make message persistent
             )
         )
-        connection.close()
 
 
     async def rollout(self):
@@ -253,7 +247,7 @@ class Player:
 
         self.print_reward_summary()
 
-        self._send_rmq()
+        self._send_experience_rmq()
 
         # Reset states.
         self.policy_inputs = []
@@ -406,9 +400,10 @@ class Game:
     ENV_RETRY_DELAY = 15
     EXCEPTION_RETRIES = 10
 
-    def __init__(self, config, dota_service):
+    def __init__(self, config, dota_service, experience_channel):
         self.config = config
         self.dota_service = dota_service
+        self.experience_channel = experience_channel
         self.game_id = 'my_game_id'
 
     async def play(self):
@@ -419,12 +414,16 @@ class Game:
             Player(
                 game_id=self.game_id,
                 player_id=0,
-                team_id=TEAM_RADIANT),
+                team_id=TEAM_RADIANT,
+                experience_channel=self.experience_channel,
+                ),
             TEAM_DIRE:
             Player(
                 game_id=self.game_id,
                 player_id=5,
-                team_id=TEAM_DIRE),
+                team_id=TEAM_DIRE,
+                experience_channel=self.experience_channel,
+                ),
         }
 
         response = await asyncio.wait_for(self.dota_service.reset(self.config), timeout=120)
@@ -468,7 +467,6 @@ class Game:
                 for player in players.values():
                     await player.rollout()
 
-                await get_latest_weights()
             if done:
                 break
 
@@ -482,9 +480,16 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main():
+async def main(rmq_host, rmq_port):
+    print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
+    # RMQ
+    rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port))
+    experience_channel = rmq_connection.channel()
+    experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 
-    # Connect to optimizer
+    await setup_model_cb(host=rmq_host, port=rmq_port)
+
+    # Connect to dota
     channel_dota = Channel(DOTASERVICE_HOST, DOTASERVICE_PORT, loop=asyncio.get_event_loop())
     dota_service = DotaServiceStub(channel_dota)
 
@@ -495,9 +500,7 @@ async def main():
         game_mode=DOTA_GAMEMODE_1V1MID,
     )
 
-    game = Game(config=config, dota_service=dota_service)
-
-    await get_latest_weights()
+    game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel)
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
@@ -508,9 +511,8 @@ async def main():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--ip", type=str, help="optimizer IP", default=OPTIMIZER_HOST)
+    parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
+    parser.add_argument("--port", type=str, help="mq port", default=5672)
     args = parser.parse_args()
 
-    OPTIMIZER_HOST = args.ip
-
-    asyncio.run(main())
+    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port))
