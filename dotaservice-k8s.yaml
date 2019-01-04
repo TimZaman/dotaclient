@@ -106,7 +106,7 @@ spec:
         image: gcr.io/dotaservice-225201/dotaclient:latest
         command:
         - python3.7
-        - dotaoptimizer.py
+        - optimizer.py
         - --ip
         - rmq.default.svc.cluster.local
         - --batch-size
@@ -150,11 +150,11 @@ spec:
       nodeSelector:
         cloud.google.com/gke-preemptible: "true"
       containers:
-      - name: client
+      - name: agent
         image: gcr.io/dotaservice-225201/dotaclient:latest
         command:
         - python3.7
-        - client.py
+        - agent.py
         - --ip
         - rmq.default.svc.cluster.local
         resources:

@@ -224,30 +224,30 @@ class DotaOptimizer:
 
         logger.info('mean_reward={}'.format(mean_reward))
 
+        speed_key = 'steps per s'
+        metrics = {
+            speed_key: steps_per_s,
+            'avg weight age': avg_weight_age,
+            'loss': loss,
+            'mean_reward': mean_reward,
+        }
+        for k, v in reward_counter.items():
+            metrics['reward_{}'.format(k)] = v / self.batch_size
+
+        # Reduce all the metrics
+        metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
+
+        if is_distributed():
+            dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
+            metrics_t /= dist.get_world_size()
+
+        metrics_d = dict(zip(metrics.keys(), metrics_t))
+
+        if is_distributed():
+            # Speed is always the sum.
+            metrics_d[speed_key] *= dist.get_world_size()
+
         if self.checkpoint:
-            speed_key = 'steps per s'
-            metrics = {
-                speed_key: steps_per_s,
-                'avg weight age': avg_weight_age,
-                'loss': loss,
-                'mean_reward': mean_reward,
-            }
-            for k, v in reward_counter.items():
-                metrics['reward_{}'.format(k)] = v / self.batch_size
-
-            # Reduce all the metrics
-            metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
-
-            if is_distributed():
-                dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
-                metrics_t /= dist.get_world_size()
-
-            metrics_d = dict(zip(metrics.keys(), metrics_t))
-
-            if is_distributed():
-                # Speed is always the sum.
-                metrics_d[speed_key] *= dist.get_world_size()
-
             # Write metrics to events file.
             for name, metric in metrics_d.items():
                 self.writer.add_scalar(name, metric, self.episode)

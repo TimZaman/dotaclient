@@ -23,5 +23,4 @@ RUN mkdir /root/dotaclient
 
 WORKDIR /root/dotaclient
 
-COPY __init__.py client.py dotaoptimizer.py policy.py /root/dotaclient/
-
+COPY __init__.py agent.py optimizer.py policy.py distributed.py /root/dotaclient/
