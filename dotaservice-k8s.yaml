@@ -110,7 +110,7 @@ spec:
         - --ip
         - rmq.default.svc.cluster.local
         - --batch-size
-        - "16"
+        - "8"
         volumeMounts:
         - name: gcs-secret
           mountPath: /etc/gcp
@@ -138,7 +138,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 12
+  replicas: 4
   selector:
     matchLabels:
       app: dotaservice

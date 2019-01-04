@@ -1,26 +1,23 @@
 from collections import Counter
-from pprint import pprint, pformat
 import argparse
 import io
 import logging
 import os
 import pickle
-import pika
 import time
 
 from google.cloud import storage
 from tensorboardX import SummaryWriter
 import numpy as np
+import pika
 import torch
+import torch.distributed as dist
 
 from policy import Policy
+from distributed import DistributedDataParallelSparseParamCPU
 
-
+logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 torch.manual_seed(7)
@@ -67,7 +64,7 @@ class DotaOptimizer:
 
         self.policy = Policy()
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            self.policy = torch.nn.parallel.DistributedDataParallelCPU(self.policy)
+            self.policy = DistributedDataParallelSparseParamCPU(self.policy)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
         self.time_last_step = time.time()
 
@@ -80,20 +77,21 @@ class DotaOptimizer:
         self.writer = SummaryWriter()
         logger.info('Checkpointing to: {}'.format(self.log_dir))
 
-        self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
-            host=rmq_host,
-            port=rmq_port,
-            heartbeat=300,
-            ))
-        self.experience_channel = self.rmq_connection.channel()
-        self.experience_channel.basic_qos(prefetch_count=self.batch_size)
-        self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
-        self.model_exchange = self.rmq_connection.channel()
-        self.model_exchange.exchange_declare(
-            exchange=self.MODEL_EXCHANGE_NAME,
-            exchange_type='x-recent-history',
-            arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
-            )
+        # self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
+        #     host=rmq_host,
+        #     port=rmq_port,
+        #     heartbeat=300,
+        #     ))
+        # self.experience_channel = self.rmq_connection.channel()
+        # self.experience_channel.basic_qos(prefetch_count=self.batch_size)
+        # self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
+
+        # self.model_exchange = self.rmq_connection.channel()
+        # self.model_exchange.exchange_declare(
+        #     exchange=self.MODEL_EXCHANGE_NAME,
+        #     exchange_type='x-recent-history',
+        #     arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
+        #     )
 
     @property
     def events_filename(self):
@@ -146,9 +144,17 @@ class DotaOptimizer:
 
     def run(self):
         while True:
+            rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
+                host=self.rmq_host,
+                port=self.rmq_port,
+                heartbeat=0,
+                ))
+            experience_channel = rmq_connection.channel()
+            experience_channel.basic_qos(prefetch_count=self.batch_size)
+            experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
             experiences = []
             for _ in range(self.batch_size):
-                method_frame, properties, body = next(self.experience_channel.consume(
+                method_frame, properties, body = next(experience_channel.consume(
                     queue=self.EXPERIENCE_QUEUE_NAME,
                     no_ack=True,
                     ))
@@ -162,6 +168,7 @@ class DotaOptimizer:
                     )
                 experiences.append(experience)
             self.step(experiences=experiences)
+            rmq_connection.close()
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -174,7 +181,7 @@ class DotaOptimizer:
 
         # Loop over each experience
         for experience in experiences:
-            self.rmq_connection.process_data_events()  # Process RMQ heartbeats.
+            # self.rmq_connection.process_data_events()  # Process RMQ heartbeats.
             log_prob_sum = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
@@ -215,19 +222,32 @@ class DotaOptimizer:
         logger.info('mean_reward={}'.format(mean_reward))
 
         if USE_CHECKPOINTS:
-            self.writer.add_scalar('steps per s', steps_per_s, self.episode)
-            self.writer.add_scalar('avg weight age', avg_weight_age, self.episode)
-            self.writer.add_scalar('loss', loss, self.episode)
-            self.writer.add_scalar('mean_reward', mean_reward, self.episode)
+
+            metrics = {
+                'steps per s': steps_per_s,
+                'avg weight age': avg_weight_age,
+                'loss': loss,
+                'mean_reward': mean_reward,
+            }
             for k, v in reward_counter.items():
-                self.writer.add_scalar('reward_{}'.format(k), v / self.batch_size, self.episode)
+                metrics['reward_{}'.format(k)] = v / self.batch_size
+
+            # Reduce all the metrics
+            metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
+            dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
+            metrics_t /= dist.get_world_size()
+
+            for name, metric in zip(metrics.keys(), metrics_t):
+                if name == 'steps per s':
+                    # The speed is always the sum. TODO(tzaman): improve
+                    metric *= dist.get_world_size()
+                self.writer.add_scalar(name, metric, self.episode)
+
             # Upload events to GCS
             blob = bucket.blob(self.events_filename)
             blob.upload_from_filename(filename=self.events_filename)
 
             self.upload_model()
-
-
 
     def upload_model(self):
         if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
@@ -253,12 +273,24 @@ class DotaOptimizer:
             f.write(buffer.read())
 
         # Send to exchange.
-        self.model_exchange.basic_publish(
+        rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
+            host=self.rmq_host,
+            port=self.rmq_port,
+            heartbeat=0,
+        ))
+        model_exchange = rmq_connection.channel()
+        model_exchange.exchange_declare(
+            exchange=self.MODEL_EXCHANGE_NAME,
+            exchange_type='x-recent-history',
+            arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
+            )
+        model_exchange.basic_publish(
             exchange=self.MODEL_EXCHANGE_NAME,
             routing_key='',
             body=buffer.getbuffer(),
             properties=pika.BasicProperties(headers={'version': self.episode}),
             )
+        rmq_connection.close()
 
         # Upload to GCP.
         blob = bucket.blob(rel_path)
@@ -286,6 +318,7 @@ def init_distribution():
     logger.info('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
 
     torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
+    logger.info("Distribution initialized.")
 
 
 def main(rmq_host, rmq_port, batch_size):

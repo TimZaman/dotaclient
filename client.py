@@ -27,15 +27,12 @@ import grpc
 import numpy as np
 import torch
 
-import pika # remove in favour of aioamqp
+import pika # TODO(tzaman): remove in favour of aioamqp
 
 from policy import Policy
 
+logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 torch.manual_seed(7)

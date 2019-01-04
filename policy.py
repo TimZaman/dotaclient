@@ -8,10 +8,11 @@ import torch.nn as nn
 from torch.distributions import Categorical
 import torch.nn.functional as F
 
-
+logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
-# logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
+torch.manual_seed(7)
 
 TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
@@ -52,7 +53,7 @@ class Policy(nn.Module):
         self.affine_unit_attention = nn.Linear(128, 128)
 
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, hidden):
-        logger.info('policy(inputs=\n{}'.format(
+        logger.debug('policy(inputs=\n{}'.format(
             pformat({'env': env,
             'allied_heroes': allied_heroes,
             'enemy_heroes': enemy_heroes,
@@ -211,4 +212,3 @@ class Policy(nn.Module):
                 log_prob=cls.action_log_prob(probs=head_prob_dict[k], sample=v),
                 )
         return action_probs
-            
