@@ -24,22 +24,16 @@ torch.manual_seed(7)
 
 eps = np.finfo(np.float32).eps.item()
 
-LEARNING_RATE = 1e-4
 
-client = storage.Client()
-bucket = client.get_bucket('dotaservice')
+def is_distributed():
+    return torch.distributed.is_available() and torch.distributed.is_initialized()
 
-USE_CHECKPOINTS = True
-MODEL_FILENAME_FMT = "model_%09d.pt"
 
-START_EPISODE = 0
-PRETRAINED_MODEL = None
-
-# START_EPISODE = 647
-# PRETRAINED_MODEL = 'runs/Dec30_22-46-22_optimizer-55f6d8fd9c-2c788/' + MODEL_FILENAME_FMT % START_EPISODE
-# model_blob = bucket.get_blob(PRETRAINED_MODEL)
-# PRETRAINED_MODEL = '/tmp/mdl.pt'
-# model_blob.download_to_filename(PRETRAINED_MODEL)
+def is_master():
+    if is_distributed():
+        return torch.distributed.get_rank() == 0
+    else:
+        return True
 
 
 class Experience:
@@ -55,43 +49,44 @@ class DotaOptimizer:
 
     EXPERIENCE_QUEUE_NAME = 'experience'
     MODEL_EXCHANGE_NAME = 'model'
+    MODEL_FILENAME_FMT = "model_%09d.pt"
+    BUCKET_NAME = 'dotaservice'
 
-    def __init__(self, rmq_host, rmq_port, batch_size):
+    def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
         self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.checkpoint = checkpoint
+        self.episode = 0
 
-        self.policy = Policy()
+        self.policy_base = Policy()
+
+        if self.checkpoint:
+            # TODO(tzaman): Set logdir ourselves?
+            self.writer = SummaryWriter()
+            logger.info('Checkpointing to: {}'.format(self.log_dir))
+            client = storage.Client()
+            self.bucket = client.get_bucket(self.BUCKET_NAME)
+
+            if pretrained_model is not None:
+                logger.info('Downloading: {}'.format(pretrained_model))
+                model_blob = self.bucket.get_blob(pretrained_model)
+                pretrained_model = '/tmp/model.pt'
+                model_blob.download_to_filename(pretrained_model)
+
+        if pretrained_model is not None:
+            self.policy_base.load_state_dict(torch.load(pretrained_model), strict=False)
+
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            self.policy = DistributedDataParallelSparseParamCPU(self.policy)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=LEARNING_RATE)
+            self.policy = DistributedDataParallelSparseParamCPU(self.policy_base)
+        else:
+            self.policy = self.policy_base
+
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
 
-        pretrained_model = PRETRAINED_MODEL
-        if pretrained_model is not None:
-            self.policy.load_state_dict(torch.load(pretrained_model), strict=False)
-
-        self.episode = START_EPISODE
-
-        self.writer = SummaryWriter()
-        logger.info('Checkpointing to: {}'.format(self.log_dir))
-
-        # self.rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
-        #     host=rmq_host,
-        #     port=rmq_port,
-        #     heartbeat=300,
-        #     ))
-        # self.experience_channel = self.rmq_connection.channel()
-        # self.experience_channel.basic_qos(prefetch_count=self.batch_size)
-        # self.experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
-
-        # self.model_exchange = self.rmq_connection.channel()
-        # self.model_exchange.exchange_declare(
-        #     exchange=self.MODEL_EXCHANGE_NAME,
-        #     exchange_type='x-recent-history',
-        #     arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
-        #     )
 
     @property
     def events_filename(self):
@@ -134,11 +129,11 @@ class DotaOptimizer:
         for policy_input, action_dict in zip(states, actions):
             head_prob_dict, hidden = self.policy(**policy_input, hidden=hidden)
 
-            action_probs = self.policy.module.action_probs(  #HACK!
+            action_probs = self.policy_base.action_probs(  #HACK!
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
             )
-            # all_action_probs.append(action_probs)
+            # all_action_probs.app                   end(action_probs)
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
@@ -153,11 +148,15 @@ class DotaOptimizer:
             experience_channel.basic_qos(prefetch_count=self.batch_size)
             experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
             experiences = []
+            delivered_tags = []
             for _ in range(self.batch_size):
-                method_frame, properties, body = next(experience_channel.consume(
+                # print(_)
+                method, properties, body = next(experience_channel.consume(
                     queue=self.EXPERIENCE_QUEUE_NAME,
-                    no_ack=True,
+                    no_ack=False,
                     ))
+                # print('mkay')
+                delivered_tags.append(method.delivery_tag)
                 data = pickle.loads(body)
                 experience = Experience(
                     game_id=data['game_id'],
@@ -167,7 +166,11 @@ class DotaOptimizer:
                     weight_version=data['weight_version'],
                     )
                 experiences.append(experience)
+                
+                
             self.step(experiences=experiences)
+            for tag in delivered_tags:
+                experience_channel.basic_ack(delivery_tag=tag)
             rmq_connection.close()
 
     def step(self, experiences):
@@ -221,10 +224,10 @@ class DotaOptimizer:
 
         logger.info('mean_reward={}'.format(mean_reward))
 
-        if USE_CHECKPOINTS:
-
+        if self.checkpoint:
+            speed_key = 'steps per s'
             metrics = {
-                'steps per s': steps_per_s,
+                speed_key: steps_per_s,
                 'avg weight age': avg_weight_age,
                 'loss': loss,
                 'mean_reward': mean_reward,
@@ -234,38 +237,38 @@ class DotaOptimizer:
 
             # Reduce all the metrics
             metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
-            dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
-            metrics_t /= dist.get_world_size()
 
-            for name, metric in zip(metrics.keys(), metrics_t):
-                if name == 'steps per s':
-                    # The speed is always the sum. TODO(tzaman): improve
-                    metric *= dist.get_world_size()
+            if is_distributed():
+                dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
+                metrics_t /= dist.get_world_size()
+
+            metrics_d = dict(zip(metrics.keys(), metrics_t))
+
+            if is_distributed():
+                # Speed is always the sum.
+                metrics_d[speed_key] *= dist.get_world_size()
+
+            # Write metrics to events file.
+            for name, metric in metrics_d.items():
                 self.writer.add_scalar(name, metric, self.episode)
 
             # Upload events to GCS
-            blob = bucket.blob(self.events_filename)
+            blob = self.bucket.blob(self.events_filename)
             blob.upload_from_filename(filename=self.events_filename)
 
             self.upload_model()
 
     def upload_model(self):
-        if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        if not is_master():
             # Only rank 0 uploads the model.
             return
 
-        filename = MODEL_FILENAME_FMT % self.episode
+        filename = self.MODEL_FILENAME_FMT % self.episode
         rel_path = os.path.join(self.log_dir, filename)
 
         # Serialize the model.
         buffer = io.BytesIO()
-        state_dict = self.policy.state_dict()
-        # Potentially remove the "module." suffix induced by DataParallel wrapper.
-        for key in list(state_dict.keys()):
-            if key[:7] == 'module.':
-                val = state_dict[key]
-                del state_dict[key]
-                state_dict[key[7:]] = val
+        state_dict = self.policy_base.state_dict()
         torch.save(state_dict, buffer)
 
         # Write model to file.
@@ -293,7 +296,7 @@ class DotaOptimizer:
         rmq_connection.close()
 
         # Upload to GCP.
-        blob = bucket.blob(rel_path)
+        blob = self.bucket.blob(rel_path)
         blob.upload_from_filename(filename=rel_path)  # Model
 
 
@@ -321,14 +324,26 @@ def init_distribution():
     logger.info("Distribution initialized.")
 
 
-def main(rmq_host, rmq_port, batch_size):
+def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model):
     logger.info('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
+ 
+    # If applicable, initialize distributed training.
     if torch.distributed.is_available():
         init_distribution()
     else:
         logger.info('distribution unavailable')
 
-    dota_optimizer = DotaOptimizer(rmq_host=rmq_host, rmq_port=rmq_port, batch_size=batch_size)
+    # Only the master should checkpoint.
+    checkpoint = is_master()
+
+    dota_optimizer = DotaOptimizer(
+        rmq_host=rmq_host,
+        rmq_port=rmq_port,
+        batch_size=batch_size,
+        learning_rate=1e-4,
+        checkpoint=checkpoint,
+        pretrained_model=pretrained_model,
+    )
 
     # Upload initial model.
     dota_optimizer.upload_model()
@@ -341,9 +356,17 @@ if __name__ == '__main__':
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--batch-size", type=int, help="batch size", default=8)
+    parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
+    parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     args = parser.parse_args()
 
     try:
-        main(rmq_host=args.ip, rmq_port=args.port, batch_size=args.batch_size)
+        main(
+            rmq_host=args.ip,
+            rmq_port=args.port,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            pretrained_model=args.pretrained_model,
+        )
     except KeyboardInterrupt:
         pass

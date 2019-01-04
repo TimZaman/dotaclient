@@ -65,7 +65,6 @@ class Policy(nn.Module):
 
         unit_embedding = torch.empty([0, 128])
 
-
         ah_embedding = []
         for unit_m in allied_heroes:
             ah1 = F.relu(self.affine_unit_basic_stats(unit_m))
