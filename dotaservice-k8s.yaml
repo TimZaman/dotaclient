@@ -53,19 +53,27 @@ spec:
         resources:
           requests:
             cpu: 200m
-            memory: 1024Mi
+            memory: 1408Mi
 ---
 apiVersion: "kubeflow.org/v1beta1"
 kind: "PyTorchJob"
 metadata:
   name: "optimizer"
 spec:
+  terminationGracePeriodSeconds: 30
   pytorchReplicaSpecs:
     Master:
       replicas: 1
       restartPolicy: OnFailure
       template: 
         spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: cloud.google.com/gke-preemptible
+                    operator: DoesNotExist
           volumes:
           - name: gcs-secret
             secret:
@@ -74,40 +82,40 @@ spec:
               - key: sa_json
                 path: sa_credentials.json
           containers:
-            - name: pytorch
-              image: gcr.io/dotaservice-225201/dotaclient:latest
-              command:
-              - python3.7
-              - optimizer.py
-              - --ip
-              - rmq.default.svc.cluster.local
-              - --batch-size
-              - "8"
-              resources:
-                requests:
-                  cpu: 400m
-              volumeMounts:
-              - name: gcs-secret
-                mountPath: /etc/gcp
-                readOnly: true
+          - name: pytorch
+            image: gcr.io/dotaservice-225201/dotaclient:latest
+            command: ["python3.7", "optimizer.py"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8"]
+            volumeMounts:
+            - name: gcs-secret
+              mountPath: /etc/gcp
+              readOnly: true
+            env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /etc/gcp/sa_credentials.json
+            resources:
+              requests:
+                cpu: 400m
     Worker:
       replicas: 3
       restartPolicy: OnFailure
       template:
         spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: cloud.google.com/gke-preemptible
+                    operator: DoesNotExist
           containers:
-            - name: pytorch
-              image: gcr.io/dotaservice-225201/dotaclient:latest
-              command:
-              - python3.7
-              - optimizer.py
-              - --ip
-              - rmq.default.svc.cluster.local
-              - --batch-size
-              - "8"
-              resources:
-                requests:
-                  cpu: 400m
+          - name: pytorch
+            image: gcr.io/dotaservice-225201/dotaclient:latest
+            command: ["python3.7", "optimizer.py"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8"]
+            resources:
+              requests:
+                cpu: 400m        
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -130,11 +138,8 @@ spec:
       containers:
       - name: agent
         image: gcr.io/dotaservice-225201/dotaclient:latest
-        command:
-        - python3.7
-        - agent.py
-        - --ip
-        - rmq.default.svc.cluster.local
+        command: ["python3.7", "agent.py"]
+        args: ["--ip", "rmq.default.svc.cluster.local"]
         resources:
           requests:
             cpu: 100m

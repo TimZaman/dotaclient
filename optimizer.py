@@ -220,7 +220,7 @@ class DotaOptimizer:
         reward_sum = sum(reward_counter.values())
         mean_reward = reward_sum / self.batch_size
 
-        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:2.f}'.format(
+        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}'.format(
             loss, steps_per_s, avg_weight_age, mean_reward))
 
         speed_key = 'steps per s'
