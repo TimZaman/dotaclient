@@ -302,24 +302,9 @@ class DotaOptimizer:
 def init_distribution():
     logger.info('init_distribution')
     assert 'WORLD_SIZE' in os.environ
-    world_size = int(os.environ['WORLD_SIZE'])
-    if world_size < 2:
+    if int(os.environ['WORLD_SIZE']) < 2:
         return
-
-    assert 'MASTER_ADDR' in os.environ
-    assert 'MASTER_PORT' in os.environ
-
-    # For the rank, we depend on the hostname's trailing ordinal index (StatefulSet)
-    hostname = os.environ['HOSTNAME']
-    rank = int(hostname.split('-')[-1])
-
-    if rank != 0:
-        USE_CHECKPOINTS = False
-
-    logger.info('hostname={}, rank={}, world_size={}'.format(hostname, rank, world_size))
-    logger.info('MASTER_ADDR={}, MASTER_PORT={}'.format(os.environ['MASTER_ADDR'], os.environ['MASTER_PORT']))
-
-    torch.distributed.init_process_group(backend='gloo', rank=rank, world_size=world_size)
+    torch.distributed.init_process_group(backend='gloo')
     logger.info("Distribution initialized.")
 
 
