@@ -55,81 +55,59 @@ spec:
             cpu: 200m
             memory: 1024Mi
 ---
-# Preferably use index job, (aka Stateful Job): track:https://github.com/kubernetes/kubernetes/issues/14188
-# StatefulSets currently require a Headless Service to be responsible for the network identity of the Pods
-apiVersion: v1
-kind: Service  # optimizer.default.svc.cluster.local
+apiVersion: "kubeflow.org/v1beta1"
+kind: "PyTorchJob"
 metadata:
-  name: optimizer
-  labels:
-    run: optimizer
+  name: "optimizer"
 spec:
-  ports:
-  - port: 29500
-    name: gloo
-  clusterIP: None
-  selector:
-    run: optimizer
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: optimizer
-spec:
-  selector:
-    matchLabels:
-      run: optimizer
-  serviceName: "optimizer"
-  replicas: 2
-  template:
-    metadata:
-      labels:
-        run: optimizer
-    spec:
-      terminationGracePeriodSeconds: 30
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: cloud.google.com/gke-preemptible
-                operator: DoesNotExist
-      volumes:
-      - name: gcs-secret
-        secret:
-          secretName: gcs-admin-secret
-          items:
-          - key: sa_json
-            path: sa_credentials.json
-      containers:
-      - name: optimizer
-        image: gcr.io/dotaservice-225201/dotaclient:latest
-        command:
-        - python3.7
-        - optimizer.py
-        - --ip
-        - rmq.default.svc.cluster.local
-        - --batch-size
-        - "8"
-        volumeMounts:
-        - name: gcs-secret
-          mountPath: /etc/gcp
-          readOnly: true
-        env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: /etc/gcp/sa_credentials.json
-        - name: MASTER_ADDR
-          value: "optimizer-0.optimizer.default.svc.cluster.local"
-        - name: MASTER_PORT
-          value: "29500"
-        - name: WORLD_SIZE
-          value: "2" 
-        ports:
-        - name: gloo
-          containerPort: 29500
-        resources:
-          requests:
-            cpu: 400m
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template: 
+        spec:
+          volumes:
+          - name: gcs-secret
+            secret:
+              secretName: gcs-admin-secret
+              items:
+              - key: sa_json
+                path: sa_credentials.json
+          containers:
+            - name: pytorch
+              image: gcr.io/dotaservice-225201/dotaclient:latest
+              command:
+              - python3.7
+              - optimizer.py
+              - --ip
+              - rmq.default.svc.cluster.local
+              - --batch-size
+              - "8"
+              resources:
+                requests:
+                  cpu: 400m
+              volumeMounts:
+              - name: gcs-secret
+                mountPath: /etc/gcp
+                readOnly: true
+    Worker:
+      replicas: 3
+      restartPolicy: OnFailure
+      template:
+        spec:
+          containers:
+            - name: pytorch
+              image: gcr.io/dotaservice-225201/dotaclient:latest
+              command:
+              - python3.7
+              - optimizer.py
+              - --ip
+              - rmq.default.svc.cluster.local
+              - --batch-size
+              - "8"
+              resources:
+                requests:
+                  cpu: 400m
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -138,7 +116,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 4
+  replicas: 32
   selector:
     matchLabels:
       app: dotaservice

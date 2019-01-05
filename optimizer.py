@@ -211,8 +211,6 @@ class DotaOptimizer:
 
         avg_weight_age = sum(all_weight_ages) / self.batch_size
 
-        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}'.format(loss, steps_per_s, avg_weight_age))
-
         reward_counter = Counter()
         for b in all_rewards:  # Jobs in a batch.
             for s in b:  # Steps in a batch.
@@ -222,7 +220,8 @@ class DotaOptimizer:
         reward_sum = sum(reward_counter.values())
         mean_reward = reward_sum / self.batch_size
 
-        logger.info('mean_reward={}'.format(mean_reward))
+        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:2.f}'.format(
+            loss, steps_per_s, avg_weight_age, mean_reward))
 
         speed_key = 'steps per s'
         metrics = {
