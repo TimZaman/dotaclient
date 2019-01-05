@@ -299,7 +299,7 @@ class DotaOptimizer:
         blob.upload_from_filename(filename=rel_path)  # Model
 
 
-def init_distribution(backend='tcp'):
+def init_distribution(backend='gloo'):
     logger.info('init_distribution')
     assert 'WORLD_SIZE' in os.environ
     if int(os.environ['WORLD_SIZE']) < 2:
