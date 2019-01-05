@@ -299,12 +299,12 @@ class DotaOptimizer:
         blob.upload_from_filename(filename=rel_path)  # Model
 
 
-def init_distribution():
+def init_distribution(backend='tcp'):
     logger.info('init_distribution')
     assert 'WORLD_SIZE' in os.environ
     if int(os.environ['WORLD_SIZE']) < 2:
         return
-    torch.distributed.init_process_group(backend='gloo')
+    torch.distributed.init_process_group(backend=backend)
     logger.info("Distribution initialized.")
 
 
