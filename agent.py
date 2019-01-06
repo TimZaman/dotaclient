@@ -157,13 +157,16 @@ async def model_callback(channel, body, envelope, properties):
     weight_received_event.set()
 
 
+async def rmq_connection_error_cb(exception):
+    logger.error('rmq_connection_error_cb(exception={})'.format(exception))
+    exit(1)
+
+
 async def setup_model_cb(host, port):
+    # TODO(tzaman): setup proper reconnection, see https://github.com/Polyconseil/aioamqp/issues/65#issuecomment-301737344
     logger.info('setup_model_cb(host={}, port={})'.format(host, port))
-    try:
-        transport, protocol = await aioamqp.connect(host=host, port=port, heartbeat=300)
-    except aioamqp.AmqpClosedConnection:
-        logger.info("closed rmq connections")
-        return
+    transport, protocol = await aioamqp.connect(
+        host=host, port=port, on_error=rmq_connection_error_cb, heartbeat=300)
     channel = await protocol.channel()
     await channel.exchange(exchange_name=MODEL_EXCHANGE_NAME, type_name='x-recent-history')
     result = await channel.queue(queue_name='', exclusive=True)

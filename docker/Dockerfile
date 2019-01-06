@@ -17,7 +17,7 @@ RUN pip3.7 install --user torch==1.0.0
 
 RUN pip3.7 install --user tensorboardX==1.5.0 google-cloud-storage==1.13.0 pika==0.12.0 aioamqp==0.12.0 grpcio==1.16.1
 
-RUN pip3.7 install --user dotaservice==0.3.0
+RUN pip3.7 install --user dotaservice==0.3.2
 
 RUN mkdir /root/dotaclient
 
