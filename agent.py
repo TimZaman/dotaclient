@@ -40,9 +40,6 @@ torch.manual_seed(7)
 # Static variables
 OPPOSITE_TEAM = {TEAM_DIRE: TEAM_RADIANT, TEAM_RADIANT: TEAM_DIRE}
 
-# Variables
-ROLLOUT_SIZE = 256
-
 TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
 HOST_TIMESCALE = 10
@@ -401,10 +398,11 @@ class Game:
     ENV_RETRY_DELAY = 15
     EXCEPTION_RETRIES = 10
 
-    def __init__(self, config, dota_service, experience_channel):
+    def __init__(self, config, dota_service, experience_channel, rollout_size):
         self.config = config
         self.dota_service = dota_service
         self.experience_channel = experience_channel
+        self.rollout_size = rollout_size
         self.game_id = 'my_game_id'
 
     async def play(self):
@@ -462,7 +460,7 @@ class Game:
             #     players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
             #     players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
 
-            if step % ROLLOUT_SIZE == 0 and step > 0:
+            if step % self.rollout_size == 0 and step > 0:
                 logger.info('Rollout!')
 
                 for player in players.values():
@@ -481,7 +479,7 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port):
+async def main(rmq_host, rmq_port, rollout_size):
     print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
@@ -508,7 +506,8 @@ async def main(rmq_host, rmq_port):
         game_mode=DOTA_GAMEMODE_1V1MID,
     )
 
-    game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel)
+    game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel,
+                rollout_size=rollout_size)
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
@@ -520,7 +519,8 @@ async def main(rmq_host, rmq_port):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
-    parser.add_argument("--port", type=str, help="mq port", default=5672)
+    parser.add_argument("--port", type=int, help="mq port", default=5672)
+    parser.add_argument("--rollout-size", type=int, help="size of each rollout (steps)", default=256)
     args = parser.parse_args()
 
-    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port))
+    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size))
