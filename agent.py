@@ -44,7 +44,6 @@ TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
 HOST_TIMESCALE = 10
 N_EPISODES = 10000000
-MAX_STEPS = 10000
 
 HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
 
@@ -231,13 +230,12 @@ class Player:
             'rewards': self.rewards,
             'weight_version': policy.weight_version,
         })
-        self.experience_channel.basic_publish(exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data,
-            # I don't think we need to make messages persistent (saved to disk)
-            # properties=pika.BasicProperties(
-            #     delivery_mode = 2, # make message persistent
-            # )
-        )
+        self.experience_channel.basic_publish(
+            exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data)
 
+    @property
+    def steps_queued(self):
+        return len(self.rewards)
 
     async def rollout(self):
         logger.info('Player {} rollout.'.format(self.player_id))
@@ -401,11 +399,12 @@ class Game:
     ENV_RETRY_DELAY = 15
     EXCEPTION_RETRIES = 10
 
-    def __init__(self, config, dota_service, experience_channel, rollout_size):
+    def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time):
         self.config = config
         self.dota_service = dota_service
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
+        self.max_dota_time = max_dota_time
         self.game_id = 'my_game_id'
 
     async def play(self):
@@ -435,9 +434,11 @@ class Game:
             TEAM_DIRE: response.world_state_dire,
         }
         done = False
-        for step in range(MAX_STEPS):  # Steps/actions in the environment
+        step = 0
+        dota_time = -float('Inf')
+        while dota_time < self.max_dota_time:
             for team_id, player in players.items():
-                logger.debug('step={}, team={}'.format(step, team_id))
+                logger.debug('dota_time={:.2f}, team={}'.format(dota_time, team_id))
                 player = players[team_id]
 
                 response = await self.dota_service.observe(ObserveConfig(team_id=team_id))
@@ -445,6 +446,7 @@ class Game:
                     done = True
                     break
                 obs = response.world_state
+                dota_time = obs.dota_time
 
                 player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
 
@@ -463,14 +465,13 @@ class Game:
             #     players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
             #     players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
 
-            if step % self.rollout_size == 0 and step > 0:
-                logger.info('Rollout!')
-
-                for player in players.values():
+            for player in players.values():
+                if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:
                     await player.rollout()
 
             if done:
                 break
+            
 
         # Final rollout. Probably partial.
         for player in players.values():
@@ -482,7 +483,7 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port, rollout_size):
+async def main(rmq_host, rmq_port, rollout_size, max_dota_time):
     print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
@@ -510,7 +511,7 @@ async def main(rmq_host, rmq_port, rollout_size):
     )
 
     game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel,
-                rollout_size=rollout_size)
+                rollout_size=rollout_size, max_dota_time=max_dota_time)
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
@@ -524,6 +525,8 @@ if __name__ == '__main__':
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--rollout-size", type=int, help="size of each rollout (steps)", default=256)
+    parser.add_argument("--max-dota-time", type=int, help="Maximum in-game (dota) time of a game before restarting", default=600)
     args = parser.parse_args()
 
-    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size))
+    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
+                     max_dota_time=args.max_dota_time))
