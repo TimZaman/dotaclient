@@ -73,6 +73,7 @@ class DotaOptimizer:
             if pretrained_model is not None:
                 logger.info('Downloading: {}'.format(pretrained_model))
                 model_blob = self.bucket.get_blob(pretrained_model)
+                # TODO(tzaman): Download to BytesIO and supply to torch in that way.
                 pretrained_model = '/tmp/model.pt'
                 model_blob.download_to_filename(pretrained_model)
 
@@ -291,7 +292,7 @@ class DotaOptimizer:
             model_exchange.exchange_declare(
                 exchange=self.MODEL_EXCHANGE_NAME,
                 exchange_type='x-recent-history',
-                arguments={'x-recent-history-length':1},
+                arguments={'x-recent-history-length': 1},
                 )
             model_exchange.basic_publish(
                 exchange=self.MODEL_EXCHANGE_NAME,
@@ -301,12 +302,11 @@ class DotaOptimizer:
                 )
             rmq_connection.close()
         except:  # Fail silently.
-            logger.exception(e)
-
+            logger.exception('Failed pushing latest weights to RMQ')
 
         # Upload to GCP.
         blob = self.bucket.blob(rel_path)
-        blob.upload_from_filename(filename=rel_path)  # Model
+        blob.upload_from_string(data=state_dict_b)  # Model
 
 
 def init_distribution(backend='gloo'):
