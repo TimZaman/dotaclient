@@ -324,7 +324,7 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model):
         rmq_host=rmq_host,
         rmq_port=rmq_port,
         batch_size=batch_size,
-        learning_rate=1e-4,
+        learning_rate=learning_rate,
         checkpoint=checkpoint,
         pretrained_model=pretrained_model,
     )
