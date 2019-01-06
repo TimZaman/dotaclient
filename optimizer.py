@@ -175,7 +175,7 @@ class DotaOptimizer:
             try:
                 rmq_connection.close()
             except:
-                pass
+                logger.exception('Failed to close RMQ')
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -272,11 +272,12 @@ class DotaOptimizer:
         # Serialize the model.
         buffer = io.BytesIO()
         state_dict = self.policy_base.state_dict()
-        torch.save(state_dict, buffer)
+        torch.save(obj=state_dict, f=buffer)
+        state_dict_b = buffer.getvalue()
 
         # Write model to file.
-        with open(rel_path,'wb') as f:
-            f.write(buffer.read())
+        with open(rel_path, 'wb') as f:
+            f.write(state_dict_b)
 
         # Send to exchange.
         # TODO(tzaman): max number of retries?
@@ -295,12 +296,12 @@ class DotaOptimizer:
             model_exchange.basic_publish(
                 exchange=self.MODEL_EXCHANGE_NAME,
                 routing_key='',
-                body=buffer.getbuffer(),
+                body=state_dict_b,
                 properties=pika.BasicProperties(headers={'version': self.episode}),
                 )
             rmq_connection.close()
-        except Exception as e:  # Fail silently.
-            logger.error(e)
+        except:  # Fail silently.
+            logger.exception(e)
 
 
         # Upload to GCP.
