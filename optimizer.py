@@ -129,11 +129,11 @@ class DotaOptimizer:
         for policy_input, action_dict in zip(states, actions):
             head_prob_dict, hidden = self.policy(**policy_input, hidden=hidden)
 
-            action_probs = self.policy_base.action_probs(  #HACK!
+            action_probs = self.policy_base.action_probs(  # HACK!
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
             )
-            # all_action_probs.app                   end(action_probs)
+            # all_action_probs.append(action_probs)
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
@@ -147,6 +147,7 @@ class DotaOptimizer:
             experience_channel = rmq_connection.channel()
             experience_channel.basic_qos(prefetch_count=self.batch_size)
             experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
+
             experiences = []
             delivered_tags = []
             for _ in range(self.batch_size):
@@ -171,7 +172,10 @@ class DotaOptimizer:
             self.step(experiences=experiences)
             for tag in delivered_tags:
                 experience_channel.basic_ack(delivery_tag=tag)
-            rmq_connection.close()
+            try:
+                rmq_connection.close()
+            except:
+                pass
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -275,24 +279,29 @@ class DotaOptimizer:
             f.write(buffer.read())
 
         # Send to exchange.
-        rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
-            host=self.rmq_host,
-            port=self.rmq_port,
-            heartbeat=0,
-        ))
-        model_exchange = rmq_connection.channel()
-        model_exchange.exchange_declare(
-            exchange=self.MODEL_EXCHANGE_NAME,
-            exchange_type='x-recent-history',
-            arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
-            )
-        model_exchange.basic_publish(
-            exchange=self.MODEL_EXCHANGE_NAME,
-            routing_key='',
-            body=buffer.getbuffer(),
-            properties=pika.BasicProperties(headers={'version': self.episode}),
-            )
-        rmq_connection.close()
+        # TODO(tzaman): max number of retries?
+        try:
+            rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
+                host=self.rmq_host,
+                port=self.rmq_port,
+                heartbeat=0,
+            ))
+            model_exchange = rmq_connection.channel()
+            model_exchange.exchange_declare(
+                exchange=self.MODEL_EXCHANGE_NAME,
+                exchange_type='x-recent-history',
+                arguments={'x-recent-history-length':1, 'x-recent-history-no-store':True},
+                )
+            model_exchange.basic_publish(
+                exchange=self.MODEL_EXCHANGE_NAME,
+                routing_key='',
+                body=buffer.getbuffer(),
+                properties=pika.BasicProperties(headers={'version': self.episode}),
+                )
+            rmq_connection.close()
+        except Exception as e:  # Fail silently.
+            logger.error(e)
+
 
         # Upload to GCP.
         blob = self.bucket.blob(rel_path)
