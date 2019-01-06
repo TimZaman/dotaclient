@@ -141,7 +141,7 @@ def get_reward(prev_obs, obs, player_id):
     reward['denies'] = denies * 0.2
 
     # Tower hp reward. Note: towers have 1900 hp.
-    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
+    # reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
 
     return reward
 
@@ -456,11 +456,11 @@ class Game:
                 prev_obs[team_id] = obs
 
             # Subtract eachothers rewards
-            if step > 0:
-                rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
-                dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
-                players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
-                players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
+            # if step > 0:
+            #     rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
+            #     dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
+            #     players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
+            #     players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
 
             if step % ROLLOUT_SIZE == 0 and step > 0:
                 logger.info('Rollout!')

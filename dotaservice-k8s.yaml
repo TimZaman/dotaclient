@@ -95,9 +95,9 @@ spec:
               value: /etc/gcp/sa_credentials.json
             resources:
               requests:
-                cpu: 400m
+                cpu: 600m
     Worker:
-      replicas: 3
+      replicas: 1
       restartPolicy: OnFailure
       template:
         spec:
@@ -124,7 +124,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 32
+  replicas: 8
   selector:
     matchLabels:
       app: dotaservice
@@ -133,6 +133,10 @@ spec:
       labels:
         app: dotaservice
     spec:
+      volumes:
+      - name: ramdisk
+        emptyDir:
+          medium: "Memory"
       nodeSelector:
         cloud.google.com/gke-preemptible: "true"
       containers:
@@ -142,12 +146,17 @@ spec:
         args: ["--ip", "rmq.default.svc.cluster.local"]
         resources:
           requests:
-            cpu: 100m
+            cpu: 700m
       - name: dotaservice
-        image: gcr.io/dotaservice-225201/dotaservice:0.3.0f
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.0g
+        command: ["python3.7", "-m", "dotaservice"]
+        args: ["--action-path", "/ramdisk"]
+        volumeMounts:
+        - mountPath: /ramdisk
+          name: ramdisk
         ports:
         - containerPort: 13337
         resources:
           requests:
-            cpu: 500m
+            cpu: 800m
             memory: 1408Mi
