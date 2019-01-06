@@ -85,7 +85,7 @@ spec:
           - name: pytorch
             image: gcr.io/dotaservice-225201/dotaclient:latest
             command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4"]
             volumeMounts:
             - name: gcs-secret
               mountPath: /etc/gcp
@@ -97,7 +97,7 @@ spec:
               requests:
                 cpu: 600m
     Worker:
-      replicas: 1
+      replicas: 11
       restartPolicy: OnFailure
       template:
         spec:
@@ -112,10 +112,10 @@ spec:
           - name: pytorch
             image: gcr.io/dotaservice-225201/dotaclient:latest
             command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4"]
             resources:
               requests:
-                cpu: 400m        
+                cpu: 600m        
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -124,7 +124,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 8
+  replicas: 36
   selector:
     matchLabels:
       app: dotaservice
@@ -148,7 +148,7 @@ spec:
           requests:
             cpu: 700m
       - name: dotaservice
-        image: gcr.io/dotaservice-225201/dotaservice:0.3.0g
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.2
         command: ["python3.7", "-m", "dotaservice"]
         args: ["--action-path", "/ramdisk"]
         volumeMounts:
@@ -159,4 +159,4 @@ spec:
         resources:
           requests:
             cpu: 800m
-            memory: 1408Mi
+            memory: 1536Mi
