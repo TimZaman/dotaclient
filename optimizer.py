@@ -134,12 +134,12 @@ class DotaOptimizer:
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
             )
-            # all_action_probs.append(action_probs)
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
         return log_prob_sum
 
     def run(self):
         while True:
+            # TODO(tzaman): it would be better to keep the connection open.
             rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
                 host=self.rmq_host,
                 port=self.rmq_port,
@@ -152,12 +152,10 @@ class DotaOptimizer:
             experiences = []
             delivered_tags = []
             for _ in range(self.batch_size):
-                # print(_)
                 method, properties, body = next(experience_channel.consume(
                     queue=self.EXPERIENCE_QUEUE_NAME,
                     no_ack=False,
                     ))
-                # print('mkay')
                 delivered_tags.append(method.delivery_tag)
                 data = pickle.loads(body)
                 experience = Experience(
@@ -168,11 +166,13 @@ class DotaOptimizer:
                     weight_version=data['weight_version'],
                     )
                 experiences.append(experience)
-                
-                
+
             self.step(experiences=experiences)
             for tag in delivered_tags:
                 experience_channel.basic_ack(delivery_tag=tag)
+            # TODO(tzaman): Acking these messages means new ones will be prefetched. This is
+            # not optimal as we are just about to close the connection. We need to try to keep the
+            # connection open, preferably.
             try:
                 rmq_connection.close()
             except:
