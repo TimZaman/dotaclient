@@ -292,7 +292,7 @@ class DotaOptimizer:
             model_exchange.exchange_declare(
                 exchange=self.MODEL_EXCHANGE_NAME,
                 exchange_type='x-recent-history',
-                arguments={'x-recent-history-length': 1},
+                arguments={'x-recent-history-length': '1'},
                 )
             model_exchange.basic_publish(
                 exchange=self.MODEL_EXCHANGE_NAME,
