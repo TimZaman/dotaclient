@@ -40,7 +40,7 @@ class Policy(nn.Module):
         self.affine_unit_anh = nn.Linear(128, 128)
         self.affine_unit_enh = nn.Linear(128, 128)
 
-        self.affine_pre_rnn = nn.Linear(128*5, 128)
+        self.affine_pre_rnn = nn.Linear(640, 128)
         self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1)
 
         # self.ln = nn.LayerNorm(128)
@@ -61,88 +61,46 @@ class Policy(nn.Module):
             'enemy_nonheroes': enemy_nonheroes,
             })))
 
-        env = F.relu(self.affine_env(env))
+        # Environment.
+        env = F.relu(self.affine_env(env))  # (128,)
 
-        unit_embedding = torch.empty([0, 128])
+        # Allied Heroes.
+        ah_basic = F.relu(self.affine_unit_basic_stats(allied_heroes))
+        ah_embedding = self.affine_unit_ah(ah_basic)
+        ah_embedding_pad = torch.cat([torch.zeros(1, 128), ah_embedding])  # Pad
+        ah_embedding_max, _ = torch.max(ah_embedding_pad, dim=0) # (128,)
 
-        ah_embedding = []
-        for unit_m in allied_heroes:
-            ah1 = F.relu(self.affine_unit_basic_stats(unit_m))
-            ah2 = self.affine_unit_ah(ah1)
-            ah_embedding.append(ah2)
+        # Enemy Heroes.
+        eh_basic = F.relu(self.affine_unit_basic_stats(enemy_heroes))
+        eh_embedding = self.affine_unit_eh(eh_basic)
+        eh_embedding_pad = torch.cat([torch.zeros(1, 128), eh_embedding])  # Pad
+        eh_embedding_max, _ = torch.max(eh_embedding_pad, dim=0) # (128,)
 
-        if ah_embedding:
-            # Create the variable length embedding for use in LSTM and attention head.
-            ah_embedding = torch.stack(ah_embedding)  # shape: (n_units, 128)
-            # We max over unit dim to have a fixed output shape bc the LSTM needs to learn about these units.
-            ah_embedding_max, _ = torch.max(ah_embedding, dim=0)  # shape: (128,)
-            ah_embedding_max = ah_embedding_max.unsqueeze(0)
-            unit_embedding = torch.cat((unit_embedding, ah_embedding), 0)  # (n, 128)
-        else:
-            ah_embedding_max = torch.zeros(1, 128)
+        # Allied Non-Heroes.
+        anh_basic = F.relu(self.affine_unit_basic_stats(allied_nonheroes))
+        anh_embedding = self.affine_unit_anh(anh_basic)
+        anh_embedding_pad = torch.cat([torch.zeros(1, 128), anh_embedding])  # Pad
+        anh_embedding_max, _ = torch.max(anh_embedding_pad, dim=0) # (128,)
 
+        # Enemy Non-Heroes.
+        enh_basic = F.relu(self.affine_unit_basic_stats(enemy_nonheroes))
+        enh_embedding = self.affine_unit_eh(enh_basic)
+        enh_embedding_pad = torch.cat([torch.zeros(1, 128), enh_embedding])  # Pad
+        enh_embedding_max, _ = torch.max(enh_embedding_pad, dim=0) # (128,)
 
-        eh_embedding = []
-        for unit_m in enemy_heroes:
-            eh1 = F.relu(self.affine_unit_basic_stats(unit_m))
-            eh2 = self.affine_unit_eh(eh1)
-            eh_embedding.append(eh2)
-
-        if eh_embedding:
-            # Create the variable length embedding for use in LSTM and attention head.
-            eh_embedding = torch.stack(eh_embedding)  # shape: (n_units, 128)
-            # We max over unit dim to have a fixed output shape bc the LSTM needs to learn about these units.
-            eh_embedding_max, _ = torch.max(eh_embedding, dim=0)  # shape: (128,)
-            eh_embedding_max = eh_embedding_max.unsqueeze(0)
-            unit_embedding = torch.cat((unit_embedding, eh_embedding), 0)  # (n, 128)
-        else:
-            eh_embedding_max = torch.zeros(1, 128)
-
-
-        anh_embedding = []
-        for unit_m in allied_nonheroes:
-            anh1 = F.relu(self.affine_unit_basic_stats(unit_m))
-            anh2 = self.affine_unit_anh(anh1)
-            anh_embedding.append(anh2)
-
-        if anh_embedding:
-            # Create the variable length embedding for use in LSTM and attention head.
-            anh_embedding = torch.stack(anh_embedding)  # shape: (n_units, 128)
-            # We max over unit dim to have a fixed output shape bc the LSTM needs to learn about these units.
-            anh_embedding_max, _ = torch.max(anh_embedding, dim=0)  # shape: (128,)
-            anh_embedding_max = anh_embedding_max.unsqueeze(0)
-            unit_embedding = torch.cat((unit_embedding, anh_embedding), 0)  # (n, 128)
-        else:
-            anh_embedding_max = torch.zeros(1, 128)
-
-
-        enh_embedding = []
-        for unit_m in enemy_nonheroes:
-            enh1 = F.relu(self.affine_unit_basic_stats(unit_m))
-            enh2 = self.affine_unit_enh(enh1)
-            enh_embedding.append(enh2)
-
-        if enh_embedding:
-            # Create the variable length embedding for use in LSTM and attention head.
-            enh_embedding = torch.stack(enh_embedding)  # shape: (n_units, 128)
-            # We max over unit dim to have a fixed output shape bc the LSTM needs to learn about these units.
-            enh_embedding_max, _ = torch.max(enh_embedding, dim=0)  # shape: (128,)
-            enh_embedding_max = enh_embedding_max.unsqueeze(0) # shape: (1, 128)
-            unit_embedding = torch.cat((unit_embedding, enh_embedding), 0)  # (n, 128)
-        else:
-            enh_embedding_max = torch.zeros(1, 128)
-
+        # Create the full unit embedding
+        unit_embedding = torch.cat((torch.empty([0, 128]), ah_embedding, eh_embedding, anh_embedding, enh_embedding))
 
         # Combine for LSTM.
-        x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max), 1)  # (512,)
-
-        x = F.relu(self.affine_pre_rnn(x))
+        x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max))  # (640,)
+        x = F.relu(self.affine_pre_rnn(x))  # (640,)
 
         # TODO(tzaman) Maybe add parameter noise here.
         # x = self.ln(x)
 
         # LSTM
-        x, hidden = self.rnn(x.unsqueeze(1), hidden)
+        x = torch.reshape(x, (1, 1, -1))  # Reshape to (seq_len, batch, inputs) = (1, 1, 640)
+        x, hidden = self.rnn(x, hidden)
         x = x.squeeze(1)
 
         # Heads.

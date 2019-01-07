@@ -279,6 +279,10 @@ class Player:
                         rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos, targettable
                     ]))
                 handles.append(unit.handle)
+        if not m:
+            m = torch.empty(0, 8)
+        else:
+            m = torch.stack(m)
         return m, handles
 
     def select_action(self, world_state, hidden):
@@ -290,7 +294,7 @@ class Player:
         dota_time_norm = world_state.dota_time / 1200.  # Normalize by 20 minutes
         creepwave_sin = math.sin(world_state.dota_time * (2. * math.pi) / 60)
 
-        env_state = torch.Tensor([dota_time_norm, creepwave_sin]).float().unsqueeze(0)
+        env_state = torch.Tensor([dota_time_norm, creepwave_sin])
 
         # Process units
         allied_heroes, allied_hero_handles = self.unit_matrix(
