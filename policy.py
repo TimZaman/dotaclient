@@ -84,7 +84,7 @@ class Policy(nn.Module):
 
         # Enemy Non-Heroes.
         enh_basic = F.relu(self.affine_unit_basic_stats(enemy_nonheroes))
-        enh_embedding = self.affine_unit_eh(enh_basic)
+        enh_embedding = self.affine_unit_enh(enh_basic)
         enh_embedding_pad = torch.cat([torch.zeros(1, 128), enh_embedding])  # Pad
         enh_embedding_max, _ = torch.max(enh_embedding_pad, dim=0) # (128,)
 
