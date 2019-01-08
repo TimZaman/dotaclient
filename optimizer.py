@@ -36,6 +36,93 @@ def is_master():
         return True
 
 
+class MessageQueue:
+    EXPERIENCE_QUEUE_NAME = 'experience'
+    MODEL_EXCHANGE_NAME = 'model'
+    MAX_RETRIES = 10
+
+    def __init__(self, host, port, prefetch_count):
+        self._params = pika.ConnectionParameters(
+            host=host,
+            port=port,
+            heartbeat=300,
+        )
+        self.prefetch_count = prefetch_count
+        self._conn = None
+        self._xp_channel = None
+        self._model_exchange = None
+
+    def connect(self):
+        if not self._conn or self._conn.is_closed:
+            # RMQ.
+            for i in range(10):
+                try:
+                    self._conn = pika.BlockingConnection(self._params)
+                except pika.exceptions.ConnectionClosed:
+                    logger.error('Connection to RMQ failed. retring. ({}/{})'.format(i, self.MAX_RETRIES))
+                    time.sleep(5)
+                    continue
+                else:
+                    logger.info('Connected to RMQ')
+                    break
+
+            # Experience channel.
+            self._xp_channel = self._conn.channel()
+            self._xp_channel.basic_qos(prefetch_count=self.prefetch_count)
+            self._xp_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
+
+            # Model Exchange.
+            self._model_exchange = self._conn.channel()
+            self._model_exchange.exchange_declare(
+                exchange=self.MODEL_EXCHANGE_NAME,
+                exchange_type='x-recent-history',
+                arguments={'x-recent-history-length': 1},
+            )
+
+    def _publish_model(self, msg, hdr):
+        self._model_exchange.basic_publish(
+            exchange=self.MODEL_EXCHANGE_NAME,
+            routing_key='',
+            body=msg,
+            properties=pika.BasicProperties(headers=hdr),
+        )
+
+    def publish_model(self, *args, **kwargs):
+        try:
+            self._publish_model(*args, **kwargs)
+        except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
+            logger.error('reconnecting to queue')
+            self.connect()
+            self._publish_model(*args, **kwargs)
+
+    def _consume_xp(self):
+        method, properties, body = next(self._xp_channel.consume(
+            queue=self.EXPERIENCE_QUEUE_NAME,
+            no_ack=False,
+        ))
+        return method, properties, body
+
+    def consume_xp(self):
+        try:
+            return self._consume_xp()
+        except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
+            logger.error('reconnecting to queue')
+            self.connect()
+            return self._consume_xp()
+
+    def ack_xp(self, tags):
+        try:
+            for tag in tags:
+                self._xp_channel.basic_ack(delivery_tag=tag)
+        except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
+            logger.error('ack failed')
+
+    def close(self):
+        if self._conn and self._conn.is_open:
+            logger.info('closing queue connection')
+            self._conn.close()
+
+
 class Experience:
     def __init__(self, game_id, states, actions, rewards, weight_version):
         self.game_id = game_id
@@ -47,8 +134,6 @@ class Experience:
 
 class DotaOptimizer:
 
-    EXPERIENCE_QUEUE_NAME = 'experience'
-    MODEL_EXCHANGE_NAME = 'model'
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
 
@@ -87,6 +172,10 @@ class DotaOptimizer:
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
+
+        self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
+                               prefetch_count=self.batch_size)
+        self.mq.connect()
 
 
     @property
@@ -139,23 +228,10 @@ class DotaOptimizer:
 
     def run(self):
         while True:
-            # TODO(tzaman): it would be better to keep the connection open.
-            rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
-                host=self.rmq_host,
-                port=self.rmq_port,
-                heartbeat=0,
-                ))
-            experience_channel = rmq_connection.channel()
-            experience_channel.basic_qos(prefetch_count=self.batch_size)
-            experience_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
-
             experiences = []
             delivered_tags = []
             for _ in range(self.batch_size):
-                method, properties, body = next(experience_channel.consume(
-                    queue=self.EXPERIENCE_QUEUE_NAME,
-                    no_ack=False,
-                    ))
+                method, properties, body = self.mq.consume_xp()
                 delivered_tags.append(method.delivery_tag)
                 data = pickle.loads(body)
                 experience = Experience(
@@ -166,17 +242,8 @@ class DotaOptimizer:
                     weight_version=data['weight_version'],
                     )
                 experiences.append(experience)
-
             self.step(experiences=experiences)
-            for tag in delivered_tags:
-                experience_channel.basic_ack(delivery_tag=tag)
-            # TODO(tzaman): Acking these messages means new ones will be prefetched. This is
-            # not optimal as we are just about to close the connection. We need to try to keep the
-            # connection open, preferably.
-            try:
-                rmq_connection.close()
-            except:
-                logger.exception('Failed to close RMQ')
+            self.mq.ack_xp(tags=delivered_tags)
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -281,28 +348,7 @@ class DotaOptimizer:
             f.write(state_dict_b)
 
         # Send to exchange.
-        # TODO(tzaman): max number of retries?
-        try:
-            rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(
-                host=self.rmq_host,
-                port=self.rmq_port,
-                heartbeat=0,
-            ))
-            model_exchange = rmq_connection.channel()
-            model_exchange.exchange_declare(
-                exchange=self.MODEL_EXCHANGE_NAME,
-                exchange_type='x-recent-history',
-                arguments={'x-recent-history-length': '1'},
-                )
-            model_exchange.basic_publish(
-                exchange=self.MODEL_EXCHANGE_NAME,
-                routing_key='',
-                body=state_dict_b,
-                properties=pika.BasicProperties(headers={'version': self.episode}),
-                )
-            rmq_connection.close()
-        except:  # Fail silently.
-            logger.exception('Failed pushing latest weights to RMQ')
+        self.mq.publish_model(msg=state_dict_b, hdr={'version': self.episode})
 
         # Upload to GCP.
         blob = self.bucket.blob(rel_path)

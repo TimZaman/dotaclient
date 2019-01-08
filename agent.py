@@ -167,7 +167,8 @@ async def setup_model_cb(host, port):
     transport, protocol = await aioamqp.connect(
         host=host, port=port, on_error=rmq_connection_error_cb, heartbeat=300)
     channel = await protocol.channel()
-    await channel.exchange(exchange_name=MODEL_EXCHANGE_NAME, type_name='x-recent-history')
+    await channel.exchange(exchange_name=MODEL_EXCHANGE_NAME, type_name='x-recent-history',
+                           arguments={'x-recent-history-length': 1})
     result = await channel.queue(queue_name='', exclusive=True)
     queue_name = result['queue']
     await channel.queue_bind(exchange_name=MODEL_EXCHANGE_NAME, queue_name=queue_name, routing_key='')
