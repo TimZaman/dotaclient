@@ -52,6 +52,12 @@ class MessageQueue:
         self._xp_channel = None
         self._model_exchange = None
 
+    def process_events(self):
+        try:
+            self._conn.process_data_events()
+        except:
+            pass
+
     def connect(self):
         if not self._conn or self._conn.is_closed:
             # RMQ.
@@ -98,7 +104,8 @@ class MessageQueue:
     def _consume_xp(self):
         method, properties, body = next(self._xp_channel.consume(
             queue=self.EXPERIENCE_QUEUE_NAME,
-            no_ack=False,
+            no_ack=True,
+            # no_ack=False,
         ))
         return method, properties, body
 
@@ -110,12 +117,12 @@ class MessageQueue:
             self.connect()
             return self._consume_xp()
 
-    def ack_xp(self, tags):
-        try:
-            for tag in tags:
-                self._xp_channel.basic_ack(delivery_tag=tag)
-        except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
-            logger.error('ack failed')
+    # def ack_xp(self, tags):
+    #     try:
+    #         for tag in tags:
+    #             self._xp_channel.basic_ack(delivery_tag=tag)
+    #     except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
+    #         logger.error('ack failed')
 
     def close(self):
         if self._conn and self._conn.is_open:
@@ -229,10 +236,10 @@ class DotaOptimizer:
     def run(self):
         while True:
             experiences = []
-            delivered_tags = []
+            # delivered_tags = []
             for _ in range(self.batch_size):
                 method, properties, body = self.mq.consume_xp()
-                delivered_tags.append(method.delivery_tag)
+                # delivered_tags.append(method.delivery_tag)
                 data = pickle.loads(body)
                 experience = Experience(
                     game_id=data['game_id'],
@@ -243,7 +250,7 @@ class DotaOptimizer:
                     )
                 experiences.append(experience)
             self.step(experiences=experiences)
-            self.mq.ack_xp(tags=delivered_tags)
+            # self.mq.ack_xp(tags=delivered_tags)
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
@@ -256,7 +263,7 @@ class DotaOptimizer:
 
         # Loop over each experience
         for experience in experiences:
-            # self.rmq_connection.process_data_events()  # Process RMQ heartbeats.
+            # self.mq.process_events()
             log_prob_sum = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
