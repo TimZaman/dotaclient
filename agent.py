@@ -31,9 +31,9 @@ import pika # TODO(tzaman): remove in favour of aioamqp
 
 from policy import Policy
 
+
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 torch.manual_seed(7)
 
@@ -50,7 +50,6 @@ HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
 DOTASERVICE_HOST = '127.0.0.1'
 DOTASERVICE_PORT = 13337
 
-LEARNING_RATE = 1e-4
 eps = np.finfo(np.float32).eps.item()
 
 # RMQ
@@ -346,6 +345,8 @@ class Player:
 
         head_prob_dict, hidden = policy(**policy_input, hidden=hidden)
 
+        logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
+
         action_dict = policy.select_actions(head_prob_dict=head_prob_dict)
 
         return action_dict, policy_input, unit_handles, hidden
@@ -531,7 +532,11 @@ if __name__ == '__main__':
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--rollout-size", type=int, help="size of each rollout (steps)", default=256)
     parser.add_argument("--max-dota-time", type=int, help="Maximum in-game (dota) time of a game before restarting", default=600)
+    parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
     args = parser.parse_args()
+
+    logger.setLevel(args.log_level)
 
     asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
                      max_dota_time=args.max_dota_time))
