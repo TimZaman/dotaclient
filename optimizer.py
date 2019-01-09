@@ -87,8 +87,9 @@ class MessageQueue:
             )
 
     def process_data_events(self):
+        # Seems useless..
         try:
-            self._conn.process_data_events(1)
+            self._conn.process_data_events()
         except:  # Gotta catch em' all!
             pass
 
@@ -296,8 +297,7 @@ class DotaOptimizer:
 
         # Loop over each experience
         for experience in experiences:
-            time.sleep(35)
-            self.mq.process_data_events()
+            self.mq.process_data_events()  # Seems useless.
             rnd_loss, rnd_rewards = self.process_rnd(experience.states)
             all_rnd_loss.extend(rnd_loss)
             # Add to rewards somehow.
