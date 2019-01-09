@@ -46,7 +46,7 @@ class MessageQueue:
         self._params = pika.ConnectionParameters(
             host=host,
             port=port,
-            heartbeat=300,
+            heartbeat=0,
         )
         self.prefetch_count = prefetch_count
         self._conn = None
@@ -85,6 +85,12 @@ class MessageQueue:
                 exchange_type='x-recent-history',
                 arguments={'x-recent-history-length': 1},
             )
+
+    def process_data_events(self):
+        try:
+            self._conn.process_data_events(1)
+        except:  # Gotta catch em' all!
+            pass
 
     def _publish_model(self, msg, hdr):
         self._model_exchange.basic_publish(
@@ -226,11 +232,13 @@ class DotaOptimizer:
 
     def process_rnd(self, states):
         rnd_loss = []
+        rnd_rewards = []
         for policy_input in states:
             of = self.rnd_fixed(**policy_input)
             o = self.rnd(**policy_input)
-            rnd_loss.append(torch.nn.functional.mse_loss(of, o))
-        rnd_rewards = rnd_loss  # Currently values look okay (<0.001 range)
+            loss = torch.nn.functional.mse_loss(of, o)
+            rnd_loss.append(loss)  # (~0.001 range)
+            rnd_rewards.append(loss/1000.)
         return rnd_loss, rnd_rewards
 
     def rnd_step(self, rnd_losses):
@@ -288,6 +296,8 @@ class DotaOptimizer:
 
         # Loop over each experience
         for experience in experiences:
+            time.sleep(35)
+            self.mq.process_data_events()
             rnd_loss, rnd_rewards = self.process_rnd(experience.states)
             all_rnd_loss.extend(rnd_loss)
             # Add to rewards somehow.

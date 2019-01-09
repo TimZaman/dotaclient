@@ -182,6 +182,8 @@ class RndModel(torch.nn.Module):
         self.requires_grad = requires_grad
 
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes):
+        if allied_heroes.size(0) == 0:  # HACK: Dead hero.
+            allied_heroes = torch.zeros(1, 8)
         inputs = torch.cat([env.view(-1), allied_heroes.view(-1)])
         x = F.relu(self.affine1(inputs))
         x = F.relu(self.affine2(x))

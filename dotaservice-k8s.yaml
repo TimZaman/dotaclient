@@ -85,7 +85,7 @@ spec:
           - name: pytorch
             image: gcr.io/dotaservice-225201/dotaclient:latest
             command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4", "--pretrained-model", "runs/Jan08_21-59-02_optimizer-master-0/model_000000762.pt"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4", "--pretrained-model", "runs/Jan08_21-59-02_optimizer-master-0/model_000000769.pt"]
             volumeMounts:
             - name: gcs-secret
               mountPath: /etc/gcp
