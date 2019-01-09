@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 from policy import Policy
+from policy import RndModel
 from distributed import DistributedDataParallelSparseParamCPU
 
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
@@ -180,6 +181,12 @@ class DotaOptimizer:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
 
+        self.rnd_fixed = RndModel(requires_grad=False)
+        self.rnd = RndModel(requires_grad=True)
+        self.rnd_lr = 1e-3
+        self.rnd_optimizer = torch.optim.Adam(self.rnd.parameters(), lr=self.rnd_lr)
+
+
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
                                prefetch_count=self.batch_size)
         self.mq.connect()
@@ -217,6 +224,22 @@ class DotaOptimizer:
 
         return loss
 
+    def process_rnd(self, states):
+        rnd_loss = []
+        for policy_input in states:
+            of = self.rnd_fixed(**policy_input)
+            o = self.rnd(**policy_input)
+            rnd_loss.append(torch.nn.functional.mse_loss(of, o))
+        rnd_rewards = rnd_loss  # Currently values look okay (<0.001 range)
+        return rnd_loss, rnd_rewards
+
+    def rnd_step(self, rnd_losses):
+        self.rnd_optimizer.zero_grad()
+        rnd_loss = torch.stack(rnd_losses).mean()
+        rnd_loss.backward()
+        self.rnd_optimizer.step()
+        return rnd_loss
+
     def process_rollout(self, states, actions):
         hidden = None
         all_rewards = []
@@ -231,6 +254,7 @@ class DotaOptimizer:
                 action_dict=action_dict,
             )
             log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
+            
         return log_prob_sum
 
     def run(self):
@@ -260,9 +284,16 @@ class DotaOptimizer:
         all_logprobs = []
         all_rewards = []
         all_weight_ages = []
+        all_rnd_loss = []
 
         # Loop over each experience
         for experience in experiences:
+            rnd_loss, rnd_rewards = self.process_rnd(experience.states)
+            all_rnd_loss.extend(rnd_loss)
+            # Add to rewards somehow.
+            for r, rnd_reward in zip(experience.rewards, rnd_rewards):
+                r['rnd'] = rnd_reward
+
             # self.mq.process_events()
             log_prob_sum = self.process_rollout(
                 states=experience.states,
@@ -278,6 +309,8 @@ class DotaOptimizer:
             all_discounted_rewards.extend(discounted_rewards)
             all_logprobs.extend(log_prob_sum)
             all_weight_ages.append(self.episode - experience.weight_version)
+
+        rnd_loss = self.rnd_step(all_rnd_loss)
 
         n_steps = len(all_discounted_rewards)
 
@@ -299,15 +332,16 @@ class DotaOptimizer:
         reward_sum = sum(reward_counter.values())
         mean_reward = reward_sum / self.batch_size
 
-        logger.info('loss={:.4f}, steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}'.format(
-            loss, steps_per_s, avg_weight_age, mean_reward))
+        logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}, loss={:.4f}, rnd_loss={:.5f}'.format(
+            steps_per_s, avg_weight_age, mean_reward, loss, rnd_loss))
 
         speed_key = 'steps per s'
         metrics = {
             speed_key: steps_per_s,
             'avg weight age': avg_weight_age,
-            'loss': loss,
             'mean_reward': mean_reward,
+            'loss': loss,
+            'rnd_loss': rnd_loss,
         }
         for k, v in reward_counter.items():
             metrics['reward_{}'.format(k)] = v / self.batch_size

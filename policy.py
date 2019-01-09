@@ -169,3 +169,22 @@ class Policy(nn.Module):
                 log_prob=cls.action_log_prob(probs=head_prob_dict[k], sample=v),
                 )
         return action_probs
+
+
+class RndModel(torch.nn.Module):
+
+    def __init__(self, requires_grad):
+        super().__init__()
+        self.affine1 = torch.nn.Linear(10, 64)
+        self.affine2 = torch.nn.Linear(64, 64)
+        self.affine3 = torch.nn.Linear(64, 64)
+        self.affine4 = torch.nn.Linear(64, 64)
+        self.requires_grad = requires_grad
+
+    def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes):
+        inputs = torch.cat([env.view(-1), allied_heroes.view(-1)])
+        x = F.relu(self.affine1(inputs))
+        x = F.relu(self.affine2(x))
+        x = F.relu(self.affine3(x))
+        x = F.relu(self.affine4(x))
+        return x
