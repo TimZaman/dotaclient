@@ -43,7 +43,7 @@ class Policy(nn.Module):
         self.affine_pre_rnn = nn.Linear(640, 128)
         self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1)
 
-        # self.ln = nn.LayerNorm(128)
+        self.ln = nn.LayerNorm(128)
 
         # Heads
         self.affine_head_enum = nn.Linear(128, 3)
@@ -89,14 +89,14 @@ class Policy(nn.Module):
         enh_embedding_max, _ = torch.max(enh_embedding_pad, dim=0) # (128,)
 
         # Create the full unit embedding
-        unit_embedding = torch.cat((torch.empty([0, 128]), ah_embedding, eh_embedding, anh_embedding, enh_embedding))
+        unit_embedding = torch.cat((torch.empty([0, 128]), ah_embedding, eh_embedding, anh_embedding, enh_embedding))  # (n, 128)
 
         # Combine for LSTM.
         x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max))  # (640,)
         x = F.relu(self.affine_pre_rnn(x))  # (640,)
 
         # TODO(tzaman) Maybe add parameter noise here.
-        # x = self.ln(x)
+        x = self.ln(x)
 
         # LSTM
         x = torch.reshape(x, (1, 1, -1))  # Reshape to (seq_len, batch, inputs) = (1, 1, 640)
