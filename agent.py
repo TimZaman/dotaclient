@@ -138,6 +138,10 @@ def get_reward(prev_obs, obs, player_id):
     # Tower hp reward. Note: towers have 1900 hp.
     # reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
 
+    # Microreward for distance to help nudge to mid initially.
+    dist_mid = math.sqrt(unit.location.x**2 + unit.location.y**2)
+    reward['dist'] = -(dist_mid / 8000.) * 0.001
+
     return reward
 
 policy = Policy()
