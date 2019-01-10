@@ -120,12 +120,12 @@ class Policy(nn.Module):
         )
 
         # TODO(tzaman): what is the correct way to handle invalid actions like below?
-        if action_dict['target_unit'].shape[1] == 0:
-            # If there are no units to target, we cannot perform 'action'
-            # TODO(tzaman): come up with something nice and generic here.
-            x = action_dict['enum'].clone()
-            x[0][2] = 0  # Mask out 'attack_target'
-            action_dict['enum'] = x
+        # if action_dict['target_unit'].shape[1] == 0:
+        #     # If there are no units to target, we cannot perform 'action'
+        #     # TODO(tzaman): come up with something nice and generic here.
+        #     x = action_dict['enum'].clone()
+        #     x[0][2] = 0  # Mask out 'attack_target'
+        #     action_dict['enum'] = x
 
         return action_dict, hidden
 
@@ -151,7 +151,8 @@ class Policy(nn.Module):
             action_dict['x'] = cls.sample_action(head_prob_dict['x'])
             action_dict['y'] = cls.sample_action(head_prob_dict['y'])
         elif action_dict['enum'] == 2:  # Attack
-            action_dict['target_unit'] = cls.sample_action(head_prob_dict['target_unit'])
+            if head_prob_dict['target_unit'].size(1) != 0:
+                action_dict['target_unit'] = cls.sample_action(head_prob_dict['target_unit'])
         else:
             ValueError("Invalid Action Selection.")
 

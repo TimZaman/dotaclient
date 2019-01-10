@@ -269,15 +269,17 @@ class Player:
                 rel_hp = (unit.health / unit.health_max) - 0.5
                 loc_x = unit.location.x / 7000.
                 loc_y = unit.location.y / 7000.
-                loc_z = unit.location.z / 7000.
+                loc_z = (unit.location.z / 512.)-0.5
                 distance_x = (hero_unit.location.x - unit.location.x)
                 distance_y = (hero_unit.location.y - unit.location.y)
                 distance = math.sqrt(distance_x**2 + distance_y**2)
                 facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)
                 facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
                 targettable = float(distance <= hero_unit.attack_range) - 0.5
-                distance_x = distance_x / 3000.
-                distance_y = distance_y / 3000.
+                distance = (distance / 7000.) - 0.5
+                # TODO(tzaman): use distance x,y
+                # distance_x = (distance_x / 3000)-0.5.
+                # distance_y = (distance_y / 3000)-0.5.
                 m.append(
                     torch.Tensor([
                         rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos, targettable
@@ -377,7 +379,10 @@ class Player:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value(
                 'DOTA_UNIT_ORDER_ATTACK_TARGET')
             m = CMsgBotWorldState.Action.AttackTarget()
-            m.target = unit_handles[action_dict['target_unit']]
+            if 'target_unit' in action_dict:
+                m.target = unit_handles[action_dict['target_unit']]
+            else:
+                m.target = -1
             m.once = True
             action_pb.attackTarget.CopyFrom(m)
         else:
