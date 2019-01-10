@@ -85,7 +85,7 @@ spec:
           - name: pytorch
             image: gcr.io/dotaservice-225201/dotaclient:latest
             command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4", "--pretrained-model", "runs/Jan08_21-59-02_optimizer-master-0/model_000000769.pt"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4"]
             volumeMounts:
             - name: gcs-secret
               mountPath: /etc/gcp
@@ -97,7 +97,7 @@ spec:
               requests:
                 cpu: 600m
     Worker:
-      replicas: 4
+      replicas: 3
       restartPolicy: OnFailure
       template:
         spec:
@@ -124,7 +124,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 20
+  replicas: 16
   selector:
     matchLabels:
       app: dotaservice
@@ -148,7 +148,7 @@ spec:
           requests:
             cpu: 700m
       - name: dotaservice
-        image: gcr.io/dotaservice-225201/dotaservice:0.3.2
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.3
         command: ["python3.7", "-m", "dotaservice"]
         args: ["--action-path", "/ramdisk"]
         volumeMounts:
