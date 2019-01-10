@@ -42,7 +42,7 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: rmq
-        image: gcr.io/dotaservice-225201/rmq:3.7-plugins-a
+        image: gcr.io/dotaservice-225201/rmq:3.7-plugins
         ports:
           - name: http
             protocol: TCP
@@ -97,7 +97,7 @@ spec:
               requests:
                 cpu: 600m
     Worker:
-      replicas: 11
+      replicas: 4
       restartPolicy: OnFailure
       template:
         spec:
@@ -124,7 +124,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 42
+  replicas: 20
   selector:
     matchLabels:
       app: dotaservice
@@ -143,7 +143,7 @@ spec:
       - name: agent
         image: gcr.io/dotaservice-225201/dotaclient:latest
         command: ["python3.7", "agent.py"]
-        args: ["--ip", "rmq.default.svc.cluster.local", "--rollout-size", "99999", "--max-dota-time", "300"]
+        args: ["--ip", "rmq.default.svc.cluster.local", "--rollout-size", "99999", "--max-dota-time", "200"]
         resources:
           requests:
             cpu: 700m
