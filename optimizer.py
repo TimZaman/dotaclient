@@ -42,6 +42,11 @@ class MessageQueue:
     MAX_RETRIES = 10
 
     def __init__(self, host, port, prefetch_count, use_model_exchange):
+        """
+        Args:
+            prefetch_count (int): Amount of messages to prefetch. Settings this variable too
+                high can result in blocked pipes that time out.
+        """
         self._params = pika.ConnectionParameters(
             host=host,
             port=port,
@@ -147,13 +152,15 @@ class DotaOptimizer:
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
 
-    def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model):
+    def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
+                 mq_prefetch_count):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.checkpoint = checkpoint
+        self.mq_prefetch_count = mq_prefetch_count
         self.episode = 0
 
         self.policy_base = Policy()
@@ -184,7 +191,7 @@ class DotaOptimizer:
         self.time_last_step = time.time()
 
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
-                               prefetch_count=2,
+                               prefetch_count=mq_prefetch_count,
                                use_model_exchange=self.checkpoint)
         self.mq.connect()
 
@@ -375,7 +382,7 @@ def init_distribution(backend='gloo'):
     logger.info("Distribution initialized.")
 
 
-def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model):
+def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_prefetch_count):
     logger.info('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
  
     # If applicable, initialize distributed training.
@@ -394,6 +401,7 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model):
         learning_rate=learning_rate,
         checkpoint=checkpoint,
         pretrained_model=pretrained_model,
+        mq_prefetch_count=mq_prefetch_count,
     )
 
     # Upload initial model.
@@ -409,6 +417,8 @@ if __name__ == '__main__':
     parser.add_argument("--batch-size", type=int, help="batch size", default=8)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
+    parser.add_argument("--mq-prefetch-count", type=int,
+                        help="amount of experience messages to prefetch from mq", default=2)
     args = parser.parse_args()
 
     try:
@@ -418,6 +428,7 @@ if __name__ == '__main__':
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             pretrained_model=args.pretrained_model,
+            mq_prefetch_count=args.mq_prefetch_count,
         )
     except KeyboardInterrupt:
         pass
