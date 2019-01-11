@@ -41,13 +41,15 @@ class MessageQueue:
     MODEL_EXCHANGE_NAME = 'model'
     MAX_RETRIES = 10
 
-    def __init__(self, host, port, prefetch_count):
+    def __init__(self, host, port, prefetch_count, use_model_exchange):
         self._params = pika.ConnectionParameters(
             host=host,
             port=port,
             heartbeat=0,
         )
         self.prefetch_count = prefetch_count
+        self.use_model_exchange = use_model_exchange
+
         self._conn = None
         self._xp_channel = None
         self._model_exchange = None
@@ -78,12 +80,13 @@ class MessageQueue:
             self._xp_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME)
 
             # Model Exchange.
-            self._model_exchange = self._conn.channel()
-            self._model_exchange.exchange_declare(
-                exchange=self.MODEL_EXCHANGE_NAME,
-                exchange_type='x-recent-history',
-                arguments={'x-recent-history-length': 1},
-            )
+            if self.use_model_exchange:
+                self._model_exchange = self._conn.channel()
+                self._model_exchange.exchange_declare(
+                    exchange=self.MODEL_EXCHANGE_NAME,
+                    exchange_type='x-recent-history',
+                    arguments={'x-recent-history-length': 1},
+                )
 
     def process_data_events(self):
         # Sends heartbeat, might keep conn healthier.
@@ -181,7 +184,8 @@ class DotaOptimizer:
         self.time_last_step = time.time()
 
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
-                               prefetch_count=self.batch_size)
+                               prefetch_count=2,
+                               use_model_exchange=self.checkpoint)
         self.mq.connect()
 
 
