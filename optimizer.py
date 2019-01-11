@@ -14,7 +14,6 @@ import torch
 import torch.distributed as dist
 
 from policy import Policy
-from policy import RndModel
 from distributed import DistributedDataParallelSparseParamCPU
 
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
@@ -87,7 +86,7 @@ class MessageQueue:
             )
 
     def process_data_events(self):
-        # Seems useless..
+        # Sends heartbeat, might keep conn healthier.
         try:
             self._conn.process_data_events()
         except:  # Gotta catch em' all!
@@ -112,9 +111,9 @@ class MessageQueue:
     def _consume_xp(self):
         method, properties, body = next(self._xp_channel.consume(
             queue=self.EXPERIENCE_QUEUE_NAME,
-            no_ack=True,
-            # no_ack=False,
+            no_ack=False,
         ))
+        self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
         return method, properties, body
 
     def consume_xp(self):
@@ -124,13 +123,6 @@ class MessageQueue:
             logger.error('reconnecting to queue')
             self.connect()
             return self._consume_xp()
-
-    # def ack_xp(self, tags):
-    #     try:
-    #         for tag in tags:
-    #             self._xp_channel.basic_ack(delivery_tag=tag)
-    #     except (pika.exceptions.ConnectionClosed, pika.exceptions.ChannelClosed):
-    #         logger.error('ack failed')
 
     def close(self):
         if self._conn and self._conn.is_open:
@@ -188,12 +180,6 @@ class DotaOptimizer:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
 
-        # self.rnd_fixed = RndModel(requires_grad=False)
-        # self.rnd = RndModel(requires_grad=True)
-        # self.rnd_lr = 1e-3
-        # self.rnd_optimizer = torch.optim.Adam(self.rnd.parameters(), lr=self.rnd_lr)
-
-
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
                                prefetch_count=self.batch_size)
         self.mq.connect()
@@ -231,24 +217,6 @@ class DotaOptimizer:
 
         return loss
 
-    # def process_rnd(self, states):
-    #     rnd_loss = []
-    #     rnd_rewards = []
-    #     for policy_input in states:
-    #         of = self.rnd_fixed(**policy_input)
-    #         o = self.rnd(**policy_input)
-    #         loss = torch.nn.functional.mse_loss(of, o)
-    #         rnd_loss.append(loss)  # (~0.001 range)
-    #         rnd_rewards.append(loss/10.)
-    #     return rnd_loss, rnd_rewards
-
-    # def rnd_step(self, rnd_losses):
-    #     self.rnd_optimizer.zero_grad()
-    #     rnd_loss = torch.stack(rnd_losses).mean()
-    #     rnd_loss.backward()
-    #     self.rnd_optimizer.step()
-    #     return rnd_loss
-
     def process_rollout(self, states, actions):
         hidden = None
         all_rewards = []
@@ -269,10 +237,8 @@ class DotaOptimizer:
     def run(self):
         while True:
             experiences = []
-            # delivered_tags = []
             for _ in range(self.batch_size):
                 method, properties, body = self.mq.consume_xp()
-                # delivered_tags.append(method.delivery_tag)
                 data = pickle.loads(body)
                 experience = Experience(
                     game_id=data['game_id'],
@@ -283,28 +249,21 @@ class DotaOptimizer:
                     )
                 experiences.append(experience)
             self.step(experiences=experiences)
-            # self.mq.ack_xp(tags=delivered_tags)
 
     def step(self, experiences):
         logger.info('::step episode={}'.format(self.episode))
+        
         # Get item form queue
         all_reward_sums = []
         all_discounted_rewards = []
         all_logprobs = []
         all_rewards = []
         all_weight_ages = []
-        # all_rnd_loss = []
 
         # Loop over each experience
         for experience in experiences:
-            self.mq.process_data_events()  # Seems useless.
-            # rnd_loss, rnd_rewards = self.process_rnd(experience.states)
-            # all_rnd_loss.extend(rnd_loss)
-            # # Add to rewards somehow.
-            # for r, rnd_reward in zip(experience.rewards, rnd_rewards):
-            #     r['rnd'] = rnd_reward
+            self.mq.process_data_events()
 
-            # self.mq.process_events()
             log_prob_sum = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
@@ -319,8 +278,6 @@ class DotaOptimizer:
             all_discounted_rewards.extend(discounted_rewards)
             all_logprobs.extend(log_prob_sum)
             all_weight_ages.append(self.episode - experience.weight_version)
-
-        # rnd_loss = self.rnd_step(all_rnd_loss)
 
         n_steps = len(all_discounted_rewards)
 
