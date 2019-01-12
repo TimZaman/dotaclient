@@ -93,6 +93,14 @@ class MessageQueue:
                     arguments={'x-recent-history-length': 1},
                 )
 
+    @property
+    def xp_queue_size(self):
+        try:
+            res = self._xp_channel.queue_declare(queue=self.EXPERIENCE_QUEUE_NAME, passive=True)
+            return res.method.message_count
+        except:
+            return None
+
     def process_data_events(self):
         # Sends heartbeat, might keep conn healthier.
         try:
@@ -152,6 +160,7 @@ class DotaOptimizer:
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
     RUNNING_NORM_FACTOR = 0.95
+    MODEL_HISTOGRAM_FREQ = 10
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
                  mq_prefetch_count):
@@ -285,7 +294,7 @@ class DotaOptimizer:
         all_discounted_rewards = []
         all_logprobs = []
         all_rewards = []
-        all_weight_ages = []
+        weight_ages = []
 
         # Loop over each experience
         for experience in experiences:
@@ -304,7 +313,7 @@ class DotaOptimizer:
 
             all_discounted_rewards.extend(discounted_rewards)
             all_logprobs.extend(log_prob_sum)
-            all_weight_ages.append(self.episode - experience.weight_version)
+            weight_ages.append(self.episode - experience.weight_version)
 
         n_steps = len(all_discounted_rewards)
 
@@ -315,7 +324,7 @@ class DotaOptimizer:
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
-        avg_weight_age = sum(all_weight_ages) / self.batch_size
+        avg_weight_age = sum(weight_ages) / self.batch_size
 
         reward_counter = Counter()
         for b in all_rewards:  # Jobs in a batch.
@@ -332,8 +341,8 @@ class DotaOptimizer:
         speed_key = 'steps per s'
         metrics = {
             speed_key: steps_per_s,
-            'avg weight age': avg_weight_age,
             'mean_reward': mean_reward,
+            'running_std': self.running_std,
             'loss': loss,
         }
         for k, v in reward_counter.items():
@@ -342,9 +351,13 @@ class DotaOptimizer:
         # Reduce all the metrics
         metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
 
+        weight_ages = torch.tensor(weight_ages)
         if is_distributed():
             dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
             metrics_t /= dist.get_world_size()
+            _weight_ages = [torch.empty_like(weight_ages) for _ in range(dist.get_world_size())]
+            dist.all_gather(_weight_ages, weight_ages)
+            weight_ages = torch.cat(_weight_ages)
 
         metrics_d = dict(zip(metrics.keys(), metrics_t))
 
@@ -356,6 +369,19 @@ class DotaOptimizer:
             # Write metrics to events file.
             for name, metric in metrics_d.items():
                 self.writer.add_scalar(name, metric, self.episode)
+            
+            # Age histogram
+            self.writer.add_histogram('weight_age', weight_ages, self.episode)
+
+            # Model
+            if self.episode % self.MODEL_HISTOGRAM_FREQ == 1:
+                for name, param in self.policy_base.named_parameters():
+                    self.writer.add_histogram(name, param.clone().cpu().data.numpy(), self.episode)
+
+            # RMQ Queue size.
+            queue_size = self.mq.xp_queue_size
+            if queue_size is not None:
+                self.writer.add_scalar('mq_size', queue_size, self.episode)
 
             # Upload events to GCS
             blob = self.bucket.blob(self.events_filename)
