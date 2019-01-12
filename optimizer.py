@@ -320,6 +320,7 @@ class DotaOptimizer:
         all_rewards = []
         weight_ages = []
         teams = []
+        n_steps = 0
 
         # Loop over each experience
         for experience in experiences:
@@ -341,8 +342,7 @@ class DotaOptimizer:
 
             teams.append(experience.team_id)
             weight_ages.append(self.episode - experience.weight_version)
-
-        n_steps = len(all_rewards)
+            n_steps += log_prob_sums.size(0)
 
         loss = self.finish_episode(rewards=all_discounted_rewards, log_probs=all_logprobs)
 
@@ -369,6 +369,10 @@ class DotaOptimizer:
         metrics = {
             speed_key: steps_per_s,
             'mean_reward': mean_reward,
+            'reward_radiant_rmean': self.running_mean[TEAM_RADIANT],
+            'reward_radiant_rstd': self.running_std[TEAM_RADIANT],
+            'reward_dire_rmean': self.running_mean[TEAM_DIRE],
+            'reward_dire_rstd': self.running_std[TEAM_DIRE],
             'loss': loss,
         }
         for k, v in reward_counter.items():
