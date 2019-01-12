@@ -342,7 +342,6 @@ class DotaOptimizer:
         metrics = {
             speed_key: steps_per_s,
             'mean_reward': mean_reward,
-            'running_std': self.running_std,
             'loss': loss,
         }
         for k, v in reward_counter.items():
