@@ -181,8 +181,8 @@ class DotaOptimizer:
         self.checkpoint = checkpoint
         self.mq_prefetch_count = mq_prefetch_count
         self.episode = 0
-        self.running_mean = None
-        self.running_std = None
+        self.running_mean = {TEAM_RADIANT: None, TEAM_DIRE: None}
+        self.running_std = {TEAM_RADIANT: None, TEAM_DIRE: None}
 
         self.policy_base = Policy()
 
@@ -235,28 +235,42 @@ class DotaOptimizer:
         return discounted_rewards
 
     def finish_episode(self, rewards, log_probs):
-        rewards = torch.tensor(rewards)
+
+        rewards_norm = {TEAM_RADIANT: [], TEAM_DIRE: []}
 
         # Preprocess normalization characteristics
-        mean_reward = rewards.mean()
-        mean_std = rewards.std()
-        if self.running_mean is None and self.running_std is None:
-            self.running_mean = mean_reward
-            self.running_std = mean_std
-        else:
-            self.running_mean = self.running_mean * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
-            self.running_std = self.running_std * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+        for team_id in [TEAM_RADIANT, TEAM_DIRE]:
 
-        # Normalize
-        rewards = rewards - self.running_mean
-        rewards = rewards / (self.running_std + eps)
+            if rewards[team_id]:
+                rewards_norm[team_id] = torch.tensor(rewards[team_id])
+                log_probs[team_id] = torch.cat(log_probs[team_id])
+            else:
+                # Account for a team being empty for this particular batch.
+                rewards_norm[team_id] = torch.empty(0)
+                log_probs[team_id] = torch.empty(0)
+                continue
 
-        loss = []
-        for log_probs, reward in zip(log_probs, rewards):
-            loss.append(-log_probs * reward)
+            mean_reward = rewards_norm[team_id].mean()
+            mean_std = rewards_norm[team_id].std()
+            if self.running_mean[team_id] is None:  #  First step
+                self.running_mean[team_id] = mean_reward
+                self.running_std[team_id] = mean_std
+            else:
+                self.running_mean[team_id] = self.running_mean[team_id] * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
+                self.running_std[team_id] = self.running_std[team_id] * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+
+            # Normalize
+            rewards_norm[team_id] = rewards_norm[team_id] - self.running_mean[team_id]
+            rewards_norm[team_id] = rewards_norm[team_id] / (self.running_std[team_id] + eps)
+
+        # Concatenate all rewards and logprobs together
+        rewards = torch.cat([rewards_norm[TEAM_RADIANT], rewards_norm[TEAM_DIRE]])
+        log_probs = torch.cat([log_probs[TEAM_RADIANT], log_probs[TEAM_DIRE]])
+
+        loss = torch.mul(-log_probs, rewards)
 
         self.optimizer.zero_grad()
-        loss = torch.cat(loss).mean()
+        loss = loss.mean()
         loss.backward()
         self.optimizer.step()
 
@@ -265,7 +279,7 @@ class DotaOptimizer:
     def process_rollout(self, states, actions):
         hidden = None
         all_rewards = []
-        log_prob_sum = []
+        log_prob_sums = []
 
         # Loop over each step.
         for policy_input, action_dict in zip(states, actions):
@@ -275,9 +289,9 @@ class DotaOptimizer:
                 head_prob_dict=head_prob_dict,
                 action_dict=action_dict,
             )
-            log_prob_sum.append(sum([ap.log_prob for _, ap in action_probs.items()]))
+            log_prob_sums.append(sum([ap.log_prob for _, ap in action_probs.items()]))
             
-        return log_prob_sum
+        return torch.cat(log_prob_sums)
 
     def run(self):
         while True:
@@ -301,8 +315,8 @@ class DotaOptimizer:
         
         # Get item form queue
         all_reward_sums = []
-        all_discounted_rewards = []
-        all_logprobs = []
+        all_discounted_rewards = {TEAM_RADIANT: [], TEAM_DIRE: []}
+        all_logprobs = {TEAM_RADIANT: [], TEAM_DIRE: []}
         all_rewards = []
         weight_ages = []
         teams = []
@@ -311,7 +325,7 @@ class DotaOptimizer:
         for experience in experiences:
             self.mq.process_data_events()
 
-            log_prob_sum = self.process_rollout(
+            log_prob_sums = self.process_rollout(
                 states=experience.states,
                 actions=experience.actions,
             )
@@ -322,12 +336,13 @@ class DotaOptimizer:
 
             all_reward_sums.append(sum(reward_sums))
 
-            all_discounted_rewards.extend(discounted_rewards)
-            all_logprobs.extend(log_prob_sum)
+            all_discounted_rewards[experience.team_id].extend(discounted_rewards)
+            all_logprobs[experience.team_id].append(log_prob_sums)
+
             teams.append(experience.team_id)
             weight_ages.append(self.episode - experience.weight_version)
 
-        n_steps = len(all_discounted_rewards)
+        n_steps = len(all_rewards)
 
         loss = self.finish_episode(rewards=all_discounted_rewards, log_probs=all_logprobs)
 
