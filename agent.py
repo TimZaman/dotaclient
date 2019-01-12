@@ -1,3 +1,4 @@
+from collections import deque
 from collections import Counter
 from pprint import pprint, pformat
 import argparse
@@ -10,6 +11,7 @@ import pickle
 import time
 import traceback
 import uuid
+import random
 
 from dotaservice.protos.dota_gcmessages_common_bot_script_pb2 import CMsgBotWorldState
 from dotaservice.protos.dota_shared_enums_pb2 import DOTA_GAMEMODE_1V1MID
@@ -35,8 +37,6 @@ from policy import Policy
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 
-torch.manual_seed(7)
-
 # Static variables
 OPPOSITE_TEAM = {TEAM_DIRE: TEAM_RADIANT, TEAM_RADIANT: TEAM_DIRE}
 
@@ -44,13 +44,12 @@ TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
 HOST_TIMESCALE = 10
 N_EPISODES = 10000000
+MAX_AGE_WEIGHTSTORE = 32
 
 HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
 
 DOTASERVICE_HOST = '127.0.0.1'
 DOTASERVICE_PORT = 13337
-
-eps = np.finfo(np.float32).eps.item()
 
 # RMQ
 EXPERIENCE_QUEUE_NAME = 'experience'
@@ -144,19 +143,34 @@ def get_reward(prev_obs, obs, player_id):
 
     return reward
 
-policy = Policy()
 
-weight_received_event = None
+class WeightStore:
+
+    def __init__(self, maxlen):
+        self.ready = None  # HACK: Will be set to an event
+        self.weights = deque(maxlen=maxlen)
+
+    def add(self, version, state_dict):
+        # TODO(tzaman): delete old ones
+        self.weights.append( (version, state_dict) )
+
+    def oldest_model(self):
+        return self.weights[0]
+
+    def latest_model(self):
+        return self.weights[-1]
+
+
+weight_store = WeightStore(maxlen=MAX_AGE_WEIGHTSTORE)
+
 
 async def model_callback(channel, body, envelope, properties):
     # TODO(tzaman): add a future so we can wait for first weights
     version = properties.headers['version']
     logger.info("Received new model: version={}, size={}b".format(version, len(body)))
     state_dict = torch.load(io.BytesIO(body))
-    policy.load_state_dict(state_dict, strict=True)
-    policy.weight_version = version
-    logger.info('Updated weights to version {}'.format(version))
-    weight_received_event.set()
+    weight_store.add(version=version, state_dict=state_dict)
+    weight_store.ready.set()
 
 
 async def rmq_connection_error_cb(exception):
@@ -203,15 +217,29 @@ def get_mid_tower(state, team_id):
 
 
 class Player:
-    def __init__(self, game_id, player_id, team_id, experience_channel):
+    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_model):
+        self.game_id = game_id
         self.player_id = player_id
+        self.team_id = team_id
+        self.experience_channel = experience_channel
+        self.use_latest_model= use_latest_model
+
         self.policy_inputs = []
         self.action_dicts = []
         self.rewards = []
         self.hidden = None
-        self.game_id = game_id
-        self.team_id = team_id
-        self.experience_channel = experience_channel
+
+        if use_latest_model:
+            version, state_dict = weight_store.latest_model()
+        else:
+            version, state_dict = weight_store.oldest_model()
+
+        self.policy = Policy()
+        self.policy.load_state_dict(state_dict, strict=True)
+        self.policy.weight_version = version
+
+        logger.info('Player {} using weights version {}'.format(
+            self.player_id, self.policy.weight_version))
 
     def print_reward_summary(self):
         reward_counter = Counter()
@@ -232,7 +260,7 @@ class Player:
             'states': self.policy_inputs,
             'actions': self.action_dicts,
             'rewards': self.rewards,
-            'weight_version': policy.weight_version,
+            'weight_version': self.policy.weight_version,
         })
         self.experience_channel.basic_publish(
             exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data)
@@ -349,11 +377,11 @@ class Player:
             enemy_nonheroes=enemy_nonheroes,
         )
 
-        head_prob_dict, hidden = policy(**policy_input, hidden=hidden)
+        head_prob_dict, hidden = self.policy(**policy_input, hidden=hidden)
 
         logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
 
-        action_dict = policy.select_actions(head_prob_dict=head_prob_dict)
+        action_dict = self.policy.select_actions(head_prob_dict=head_prob_dict)
 
         return action_dict, policy_input, unit_handles, hidden
 
@@ -414,16 +442,23 @@ class Game:
     ENV_RETRY_DELAY = 15
     EXCEPTION_RETRIES = 10
 
-    def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time):
+    def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time,
+                 latest_model_prob):
         self.config = config
         self.dota_service = dota_service
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
         self.max_dota_time = max_dota_time
         self.game_id = 'my_game_id'
+        self.latest_model_prob = latest_model_prob
 
     async def play(self):
         logger.info('Starting game.')
+
+        use_latest_model = {TEAM_RADIANT: True, TEAM_DIRE: True}
+        if random.random() > self.latest_model_prob:
+            old_model_team = random.choice([TEAM_RADIANT, TEAM_DIRE])
+            use_latest_model[old_model_team] = False
 
         players = {
             TEAM_RADIANT:
@@ -432,6 +467,7 @@ class Game:
                 player_id=0,
                 team_id=TEAM_RADIANT,
                 experience_channel=self.experience_channel,
+                use_latest_model=use_latest_model[TEAM_RADIANT],
                 ),
             TEAM_DIRE:
             Player(
@@ -439,6 +475,7 @@ class Game:
                 player_id=5,
                 team_id=TEAM_DIRE,
                 experience_channel=self.experience_channel,
+                use_latest_model=use_latest_model[TEAM_DIRE],
                 ),
         }
 
@@ -498,21 +535,20 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port, rollout_size, max_dota_time):
+async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_prob):
     print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
     experience_channel = rmq_connection.channel()
     experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 
-    global weight_received_event  # HACK
-    weight_received_event = asyncio.Event(loop=asyncio.get_event_loop())
+    weight_store.ready = asyncio.Event(loop=asyncio.get_event_loop())
 
     # Set up the model callback.
     await setup_model_cb(host=rmq_host, port=rmq_port)
 
     # Wait for the first model weight to come in.
-    await weight_received_event.wait()
+    await weight_store.ready.wait()
 
     # Connect to dota
     channel_dota = Channel(DOTASERVICE_HOST, DOTASERVICE_PORT, loop=asyncio.get_event_loop())
@@ -526,7 +562,8 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time):
     )
 
     game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel,
-                rollout_size=rollout_size, max_dota_time=max_dota_time)
+                rollout_size=rollout_size, max_dota_time=max_dota_time,
+                latest_model_prob=latest_model_prob)
 
     for episode in range(0, N_EPISODES):
         logger.info('=== Starting Episode {}.'.format(episode))
@@ -543,9 +580,11 @@ if __name__ == '__main__':
     parser.add_argument("--max-dota-time", type=int, help="Maximum in-game (dota) time of a game before restarting", default=600)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
+    parser.add_argument("--use-latest-model-prob", type=float,
+                        help="Probability of using the latest model. Otherwise some old one is chosen if available.", default=0.8)
     args = parser.parse_args()
 
     logger.setLevel(args.log_level)
 
     asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
-                     max_dota_time=args.max_dota_time))
+                     max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob))

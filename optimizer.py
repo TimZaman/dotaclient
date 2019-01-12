@@ -374,7 +374,7 @@ class DotaOptimizer:
             self.writer.add_histogram('weight_age', weight_ages, self.episode)
 
             # Model
-            if self.episode % self.MODEL_HISTOGRAM_FREQ == 1:
+            if self.episode % self.MODEL_HISTOGRAM_FREQ == 0:
                 for name, param in self.policy_base.named_parameters():
                     self.writer.add_histogram(name, param.clone().cpu().data.numpy(), self.episode)
 
