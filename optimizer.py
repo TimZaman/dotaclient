@@ -151,6 +151,7 @@ class DotaOptimizer:
 
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
+    RUNNING_NORM_FACTOR = 0.95
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
                  mq_prefetch_count):
@@ -162,6 +163,8 @@ class DotaOptimizer:
         self.checkpoint = checkpoint
         self.mq_prefetch_count = mq_prefetch_count
         self.episode = 0
+        self.running_mean = None
+        self.running_std = None
 
         self.policy_base = Policy()
 
@@ -215,7 +218,20 @@ class DotaOptimizer:
 
     def finish_episode(self, rewards, log_probs):
         rewards = torch.tensor(rewards)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + eps)
+
+        # Preprocess normalization characteristics
+        mean_reward = rewards.mean()
+        mean_std = rewards.std()
+        if self.running_mean is None and self.running_std is None:
+            self.running_mean = mean_reward
+            self.running_std = mean_std
+        else:
+            self.running_mean = self.running_mean * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
+            self.running_std = self.running_std * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+
+        # Normalize
+        rewards = rewards - self.running_mean
+        rewards = rewards / (self.running_std + eps)
 
         loss = []
         for log_probs, reward in zip(log_probs, rewards):
