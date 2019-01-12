@@ -13,8 +13,10 @@ import pika
 import torch
 import torch.distributed as dist
 
-from policy import Policy
 from distributed import DistributedDataParallelSparseParamCPU
+from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
+from policy import Policy
+
 
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
@@ -147,12 +149,19 @@ class MessageQueue:
 
 
 class Experience:
-    def __init__(self, game_id, states, actions, rewards, weight_version):
+    def __init__(self, game_id, states, actions, rewards, weight_version, team_id):
         self.game_id = game_id
         self.states = states
         self.actions = actions
         self.rewards = rewards
         self.weight_version = weight_version
+        self.team_id = team_id
+
+
+def all_gather(t):
+    _t = [torch.empty_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(_t, t)
+    return torch.cat(_t)
 
 
 class DotaOptimizer:
@@ -282,6 +291,7 @@ class DotaOptimizer:
                     actions=data['actions'],
                     rewards=data['rewards'],
                     weight_version=data['weight_version'],
+                    team_id=data['team_id'],
                     )
                 experiences.append(experience)
             self.step(experiences=experiences)
@@ -295,6 +305,7 @@ class DotaOptimizer:
         all_logprobs = []
         all_rewards = []
         weight_ages = []
+        teams = []
 
         # Loop over each experience
         for experience in experiences:
@@ -313,6 +324,7 @@ class DotaOptimizer:
 
             all_discounted_rewards.extend(discounted_rewards)
             all_logprobs.extend(log_prob_sum)
+            teams.append(experience.team_id)
             weight_ages.append(self.episode - experience.weight_version)
 
         n_steps = len(all_discounted_rewards)
@@ -351,12 +363,15 @@ class DotaOptimizer:
         metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
 
         weight_ages = torch.tensor(weight_ages)
+        teams = torch.tensor(teams)
+        all_reward_sums = torch.tensor(all_reward_sums)
         if is_distributed():
             dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
             metrics_t /= dist.get_world_size()
-            _weight_ages = [torch.empty_like(weight_ages) for _ in range(dist.get_world_size())]
-            dist.all_gather(_weight_ages, weight_ages)
-            weight_ages = torch.cat(_weight_ages)
+
+            weight_ages = all_gather(weight_ages)
+            teams = all_gather(teams)
+            all_reward_sums = all_gather(all_reward_sums)
 
         metrics_d = dict(zip(metrics.keys(), metrics_t))
 
@@ -371,6 +386,10 @@ class DotaOptimizer:
             
             # Age histogram
             self.writer.add_histogram('weight_age', weight_ages, self.episode)
+
+            # Rewards histogram
+            self.writer.add_histogram('rewards_radiant', all_reward_sums[teams==TEAM_RADIANT], self.episode)
+            self.writer.add_histogram('rewards_dire', all_reward_sums[teams==TEAM_DIRE], self.episode)
 
             # Model
             if self.episode % self.MODEL_HISTOGRAM_FREQ == 0:
