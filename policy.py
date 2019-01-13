@@ -43,7 +43,7 @@ class Policy(nn.Module):
         self.affine_pre_rnn = nn.Linear(640, 128)
         self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1)
 
-        self.ln = nn.LayerNorm(128)
+        # self.ln = nn.LayerNorm(128)
 
         # Heads
         self.affine_head_enum = nn.Linear(128, 3)
@@ -96,7 +96,7 @@ class Policy(nn.Module):
         x = F.relu(self.affine_pre_rnn(x))  # (640,)
 
         # TODO(tzaman) Maybe add parameter noise here.
-        x = self.ln(x)
+        # x = self.ln(x)
 
         # LSTM
         x = torch.reshape(x, (1, 1, -1))  # Reshape to (seq_len, batch, inputs) = (1, 1, 640)
