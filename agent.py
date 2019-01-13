@@ -582,7 +582,7 @@ if __name__ == '__main__':
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
     parser.add_argument("--use-latest-model-prob", type=float,
-                        help="Probability of using the latest model. Otherwise some old one is chosen if available.", default=0.8)
+                        help="Probability of using the latest model. Otherwise some old one is chosen if available.", default=1.0)
     args = parser.parse_args()
 
     logger.setLevel(args.log_level)
