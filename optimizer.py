@@ -170,7 +170,7 @@ class DotaOptimizer:
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
     RUNNING_NORM_FACTOR = 0.95
-    MODEL_HISTOGRAM_FREQ = 10
+    MODEL_HISTOGRAM_FREQ = 100
     MAX_GRAD_NORM = 0.5
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
