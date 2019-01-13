@@ -250,14 +250,14 @@ class DotaOptimizer:
                 log_probs[team_id] = torch.empty(0)
                 continue
 
-            mean_reward = rewards_norm[team_id].mean()
-            mean_std = rewards_norm[team_id].std()
+            reward_mean = rewards_norm[team_id].mean()
+            reward_std = rewards_norm[team_id].std()
             if self.running_mean[team_id] is None:  #  First step
-                self.running_mean[team_id] = mean_reward
-                self.running_std[team_id] = mean_std
+                self.running_mean[team_id] = reward_mean
+                self.running_std[team_id] = reward_std
             else:
-                self.running_mean[team_id] = self.running_mean[team_id] * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
-                self.running_std[team_id] = self.running_std[team_id] * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+                self.running_mean[team_id] = self.running_mean[team_id] * self.RUNNING_NORM_FACTOR + reward_mean * (1 - self.RUNNING_NORM_FACTOR)
+                self.running_std[team_id] = self.running_std[team_id] * self.RUNNING_NORM_FACTOR + reward_std * (1 - self.RUNNING_NORM_FACTOR)
 
             # Normalize
             rewards_norm[team_id] = rewards_norm[team_id] - self.running_mean[team_id]
