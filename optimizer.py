@@ -170,6 +170,7 @@ class DotaOptimizer:
     BUCKET_NAME = 'dotaservice'
     RUNNING_NORM_FACTOR = 0.95
     MODEL_HISTOGRAM_FREQ = 10
+    MAX_GRAD_NORM = 0.5
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
                  mq_prefetch_count):
@@ -272,11 +273,13 @@ class DotaOptimizer:
         self.optimizer.zero_grad()
         loss = loss.mean()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
 
         return loss
 
     def process_rollout(self, states, actions):
+        """Processes a single experience consisting out of multiple steps."""
         hidden = None
         all_rewards = []
         log_prob_sums = []
