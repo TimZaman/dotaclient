@@ -327,8 +327,9 @@ class Player:
 
         dota_time_norm = world_state.dota_time / 1200.  # Normalize by 20 minutes
         creepwave_sin = math.sin(world_state.dota_time * (2. * math.pi) / 60)
+        team_float = -.2 if self.team_id == TEAM_DIRE else .2
 
-        env_state = torch.Tensor([dota_time_norm, creepwave_sin])
+        env_state = torch.Tensor([dota_time_norm, creepwave_sin, team_float])
 
         # Process units
         allied_heroes, allied_hero_handles = self.unit_matrix(

@@ -31,7 +31,7 @@ class Policy(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.affine_env = nn.Linear(2, 128)
+        self.affine_env = nn.Linear(3, 128)
 
         self.affine_unit_basic_stats = nn.Linear(8, 128)
 
