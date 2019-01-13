@@ -1,5 +1,6 @@
 from collections import Counter
 import argparse
+import copy
 import io
 import logging
 import os
@@ -243,7 +244,7 @@ class DotaOptimizer:
         for team_id in [TEAM_RADIANT, TEAM_DIRE]:
 
             if rewards[team_id]:
-                rewards_norm[team_id] = torch.tensor(rewards[team_id])
+                rewards_norm[team_id] = torch.cat(rewards[team_id])
                 log_probs[team_id] = torch.cat(log_probs[team_id])
             else:
                 # Account for a team being empty for this particular batch.
@@ -336,11 +337,11 @@ class DotaOptimizer:
 
             all_rewards.append(experience.rewards)
             reward_sums = [sum(r.values()) for r in experience.rewards]
-            discounted_rewards = self.discount_rewards(reward_sums)
+            discounted_rewards = torch.tensor(self.discount_rewards(reward_sums))
 
             all_reward_sums.append(sum(reward_sums))
 
-            all_discounted_rewards[experience.team_id].extend(discounted_rewards)
+            all_discounted_rewards[experience.team_id].append(discounted_rewards)
             all_logprobs[experience.team_id].append(log_prob_sums)
 
             teams.append(experience.team_id)
