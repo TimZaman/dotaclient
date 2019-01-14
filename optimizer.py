@@ -239,7 +239,8 @@ class DotaOptimizer:
         return t
 
     def finish_episode(self, probs, rewards):
-        loss = torch.mul(probs, rewards)
+        log_probs = torch.log(probs)
+        loss = torch.mul(-log_probs, rewards)
         self.optimizer.zero_grad()
         loss = loss.mean()
         loss.backward()
