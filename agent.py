@@ -251,13 +251,35 @@ class Player:
         logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
             self.player_id, reward_sum, pformat(reward_counter)))
 
+    @staticmethod
+    def pack_policy_inputs(inputs):
+        """Convert the list-of-dicts into a dict with a single tensor per input for the sequence."""
+
+        d = {'env':[], 'allied_heroes':[], 'enemy_heroes':[], 'allied_nonheroes':[], 'enemy_nonheroes':[]}
+        for inp in inputs:  # go over steps: (list of dicts)
+            for k, v in inp.items(): # go over each input in the step (dict)
+                d[k].append(v)
+
+        # Pack it up
+        for k, v in d.items():
+            # Concatenate together all inputs into a single tensor.
+            # We formerly padded this instead of stacking, but that presented issues keeping track
+            # of the chosen action ids related to units.
+            d[k] = torch.stack(v)
+        return d
+
     def _send_experience_rmq(self):
         logger.debug('_send_experience_rmq')
+
+        # Pack all the policy inputs into dense tensors
+
+        packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
+
         data = pickle.dumps({
             'game_id': self.game_id,
             'team_id': self.team_id,
             'player_id': self.player_id,
-            'states': self.policy_inputs,
+            'states': packed_policy_inputs,
             'actions': self.action_dicts,
             'rewards': self.rewards,
             'weight_version': self.policy.weight_version,
@@ -287,13 +309,20 @@ class Player:
 
     @staticmethod
     def unit_matrix(state, hero_unit, team_id, unit_types, only_self=False):
-        handles = []
-        m = []
+        # We are always inserting an 'zero' unit to make sure the policy doesn't barf
+        # We can't just pad this, because we will otherwise lose track of corresponding chosen
+        # actions relating to output indices. Even if we would, batching multiple sequences together
+        # would then be another error prone nightmare.
+        handles = torch.full([Policy.MAX_UNITS], -1)
+        m = torch.zeros(Policy.MAX_UNITS, 8)
+        i = 0
         for unit in state.units:
             if unit.team_id == team_id and unit.is_alive and unit.unit_type in unit_types:
                 if only_self:
                     if unit != hero_unit:
                         continue
+                if i >= Policy.MAX_UNITS:
+                    break
                 rel_hp = (unit.health / unit.health_max) - 0.5
                 loc_x = unit.location.x / 7000.
                 loc_y = unit.location.y / 7000.
@@ -308,15 +337,12 @@ class Player:
                 # TODO(tzaman): use distance x,y
                 # distance_x = (distance_x / 3000)-0.5.
                 # distance_y = (distance_y / 3000)-0.5.
-                m.append(
-                    torch.Tensor([
-                        rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos, targettable
+                m[i] = (
+                    torch.tensor([
+                        rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos, targettable,
                     ]))
-                handles.append(unit.handle)
-        if not m:
-            m = torch.empty(0, 8)
-        else:
-            m = torch.stack(m)
+                handles[i] = unit.handle
+                i += 1
         return m, handles
 
     def select_action(self, world_state, hidden):
@@ -368,7 +394,7 @@ class Player:
             team_id=OPPOSITE_TEAM[hero_unit.team_id],
         )
 
-        unit_handles = allied_hero_handles + enemy_hero_handles + allied_nonhero_handles + enemy_nonhero_handles
+        unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles])
 
         policy_input = dict(
             env=env_state,
@@ -378,7 +404,7 @@ class Player:
             enemy_nonheroes=enemy_nonheroes,
         )
 
-        head_prob_dict, hidden = self.policy(**policy_input, hidden=hidden)
+        head_prob_dict, hidden = self.policy.single(**policy_input, hidden=hidden)
 
         logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
 
@@ -537,7 +563,7 @@ class Game:
 
 
 async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_prob):
-    print('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
+    logger.info('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
     experience_channel = rmq_connection.channel()

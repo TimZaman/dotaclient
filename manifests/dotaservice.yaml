@@ -5,7 +5,7 @@ metadata:
   labels:
     app: dotaservice
 spec:
-  replicas: 54
+  replicas: 7
   selector:
     matchLabels:
       app: dotaservice

@@ -28,7 +28,7 @@ spec:
           - name: pytorch
             image: gcr.io/dotaservice-225201/dotaclient:latest
             command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "12", "--learning-rate", "1e-4", "--pretrained-model", "runs/Jan12_08-50-52_optimizer-master-0/model_000000076.pt"]
+            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4"]
             volumeMounts:
             - name: gcs-secret
               mountPath: /etc/gcp
@@ -39,23 +39,23 @@ spec:
             resources:
               requests:
                 cpu: 600m
-    Worker:
-      replicas: 7
-      restartPolicy: OnFailure
-      template:
-        spec:
-          affinity:
-            nodeAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-                nodeSelectorTerms:
-                - matchExpressions:
-                  - key: cloud.google.com/gke-preemptible
-                    operator: DoesNotExist
-          containers:
-          - name: pytorch
-            image: gcr.io/dotaservice-225201/dotaclient:latest
-            command: ["python3.7", "optimizer.py"]
-            args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "12", "--learning-rate", "1e-4"]
-            resources:
-              requests:
-                cpu: 600m
+    # Worker:
+    #   replicas: 0
+    #   restartPolicy: OnFailure
+    #   template:
+    #     spec:
+    #       affinity:
+    #         nodeAffinity:
+    #           requiredDuringSchedulingIgnoredDuringExecution:
+    #             nodeSelectorTerms:
+    #             - matchExpressions:
+    #               - key: cloud.google.com/gke-preemptible
+    #                 operator: DoesNotExist
+    #       containers:
+    #       - name: pytorch
+    #         image: gcr.io/dotaservice-225201/dotaclient:latest
+    #         command: ["python3.7", "optimizer.py"]
+    #         args: ["--ip", "rmq.default.svc.cluster.local", "--batch-size", "8", "--learning-rate", "1e-4"]
+    #         resources:
+    #           requests:
+    #             cpu: 600m
