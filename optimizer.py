@@ -419,6 +419,7 @@ class DotaOptimizer:
                 self.writer.add_scalar('mq_size', queue_size, self.episode)
 
             # Upload events to GCS
+            self.writer.file_writer.flush()  # Flush before uploading
             blob = self.bucket.blob(self.events_filename)
             blob.upload_from_filename(filename=self.events_filename)
 
