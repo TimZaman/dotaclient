@@ -1,10 +1,13 @@
 from collections import Counter
+from datetime import datetime
 import argparse
 import copy
 import io
 import logging
 import os
 import pickle
+import re
+import socket
 import time
 
 from google.cloud import storage
@@ -174,7 +177,7 @@ class DotaOptimizer:
     MAX_GRAD_NORM = 0.5
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
-                 mq_prefetch_count):
+                 mq_prefetch_count, exp_dir, job_dir):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
@@ -184,13 +187,26 @@ class DotaOptimizer:
         self.mq_prefetch_count = mq_prefetch_count
         self.episode = 0
         self.policy_base = Policy()
+        self.exp_dir = exp_dir
+        self.job_dir = job_dir
+        self.log_dir = os.path.join(exp_dir, job_dir)
 
         if self.checkpoint:
             # TODO(tzaman): Set logdir ourselves?
-            self.writer = SummaryWriter()
+            self.writer = SummaryWriter(log_dir=self.log_dir)
             logger.info('Checkpointing to: {}'.format(self.log_dir))
             client = storage.Client()
             self.bucket = client.get_bucket(self.BUCKET_NAME)
+
+            # First, check if logdir exists.
+            latest_model = self.get_latest_model(prefix=self.log_dir)
+            # If there's a model in here, we resume from there
+            if latest_model is not None:
+                logger.info('Found a latest model in pretrained dir: {}'.format(latest_model))
+                self.episode = self.episode_from_model_filename(filename=latest_model)
+                if pretrained_model is not None:
+                    logger.warning('Overriding pretrained model by latest model.')
+                pretrained_model = latest_model
 
             if pretrained_model is not None:
                 logger.info('Downloading: {}'.format(pretrained_model))
@@ -215,14 +231,28 @@ class DotaOptimizer:
                                use_model_exchange=self.checkpoint)
         self.mq.connect()
 
+    @staticmethod
+    def episode_from_model_filename(filename):
+        x = re.search('(\d+)(?=.pt)', filename)
+        return int(x.group(0))
+
+    def get_latest_model(self, prefix):
+        blobs = list(self.bucket.list_blobs(prefix=prefix))
+        if not blobs:
+            # Directory does not exist, or no files in directory.
+            return None
+        else:
+            fns = [x.name for x in blobs if x.name[-3:] == '.pt']
+            if not fns:
+                # No relevant files in directory.
+                return None
+            fns.sort()
+            latest_model = fns[-1]
+            return latest_model
 
     @property
     def events_filename(self):
         return self.writer.file_writer.event_writer._ev_writer._file_name
-
-    @property
-    def log_dir(self):
-        return self.writer.file_writer.get_logdir()
 
     @staticmethod
     def discount_rewards(rewards, gamma=0.99):
@@ -460,8 +490,10 @@ def init_distribution(backend='gloo'):
     logger.info("Distribution initialized.")
 
 
-def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_prefetch_count):
-    logger.info('main(rmq_host={}, rmq_port={}, batch_size={})'.format(rmq_host, rmq_port, batch_size))
+def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_prefetch_count,
+         exp_dir, job_dir):
+    logger.info('main(rmq_host={}, rmq_port={}, batch_size={} exp_dir={}, job_dir={})'.format(
+        rmq_host, rmq_port, batch_size, exp_dir, job_dir))
  
     # If applicable, initialize distributed training.
     if torch.distributed.is_available():
@@ -480,6 +512,8 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_pre
         checkpoint=checkpoint,
         pretrained_model=pretrained_model,
         mq_prefetch_count=mq_prefetch_count,
+        exp_dir=exp_dir,
+        job_dir=job_dir,
     )
 
     # Upload initial model.
@@ -488,8 +522,14 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_pre
     dota_optimizer.run()
 
 
+def default_job_dir():
+    return '{}_{}'.format(datetime.now().strftime('%b%d_%H-%M-%S'), socket.gethostname())
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--exp-dir", type=str, help="experiment dir name", default='runs')
+    parser.add_argument("--job-dir", type=str, help="job dir name", default=default_job_dir())
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--batch-size", type=int, help="batch size", default=8)
@@ -507,6 +547,8 @@ if __name__ == '__main__':
             learning_rate=args.learning_rate,
             pretrained_model=args.pretrained_model,
             mq_prefetch_count=args.mq_prefetch_count,
+            exp_dir=args.exp_dir,
+            job_dir=args.job_dir,
         )
     except KeyboardInterrupt:
         pass
