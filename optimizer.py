@@ -170,7 +170,7 @@ class DotaOptimizer:
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
     RUNNING_NORM_FACTOR = 0.95
-    MODEL_HISTOGRAM_FREQ = 100
+    MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
 
     def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
@@ -380,15 +380,15 @@ class DotaOptimizer:
         metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
 
         weight_ages = torch.tensor(weight_ages)
-        # teams = torch.tensor(teams)
-        # all_reward_sums = torch.tensor(all_reward_sums)
+        teams = torch.tensor(teams)
+        all_reward_sums = torch.tensor(all_reward_sums)
         if is_distributed():
             dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
             metrics_t /= dist.get_world_size()
 
             weight_ages = all_gather(weight_ages)
-            # teams = all_gather(teams)
-            # all_reward_sums = all_gather(all_reward_sums)
+            teams = all_gather(teams)
+            all_reward_sums = all_gather(all_reward_sums)
 
         metrics_d = dict(zip(metrics.keys(), metrics_t))
 
