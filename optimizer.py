@@ -255,7 +255,11 @@ class DotaOptimizer:
         return self.writer.file_writer.event_writer._ev_writer._file_name
 
     @staticmethod
-    def discount_rewards(rewards, gamma=0.99):
+    def discount_rewards(rewards, gamma=0.98):
+        """
+        0.99^70 = 0.5
+        0.98^35 = 0.5
+        """
         R = 0
         discounted_rewards = []
         for r in rewards[::-1]:
