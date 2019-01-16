@@ -6,14 +6,21 @@
 
 ## Prerequisites
 
-* Kubeflow's PyTorch Operator
+* Kubeflow's [PyTorch Operator](https://github.com/kubeflow/pytorch-operator)
 * Google Cloud Storage (GCS)
-* https://github.com/TimZaman/DotaService and build the dotaservice into a Docker image
-* Build the dotaservice docker image
-* Build the rabbitmq docker image
+* Kubernetes Cluster (e.g. GKE).
+* Build the [dota docker image](https://github.com/TimZaman/DotaService)
+* Build the [dotaservice docker image](https://github.com/TimZaman/DotaService)
+* Build the [rabbitmq docker image](docker/Dockerfile-rmq)
+* Install [ksonnet](https://ksonnet.io/)
 
+## Launch distributed dota training
+
+```bash
+cd ks-app
+ks show default  # Shows the full manifest
+ks param list  # Lists all parameters
+ks apply default  # Launches everything you need
 ```
-kubectl create -f manifests/rmq.yaml
-kubectl create -f manifests/dotaservice.yaml
-kubectl create -f manifests/optimizer.yaml
-```
+
+Note: A typical job has 40 agents per optimizer. One optimizer does around 1000 steps/s.
