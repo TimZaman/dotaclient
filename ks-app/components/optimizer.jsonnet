@@ -1,7 +1,7 @@
 local params = std.extVar("__ksonnet/params").components["dotaservice"];
 
 local worker(replicas) = {
-    "replicas": replicas,
+    "replicas": std.toString(replicas),
     "restartPolicy": "OnFailure",
     "template": {
         "spec": {
@@ -27,9 +27,9 @@ local worker(replicas) = {
                         "--ip",
                         params.jobname + "-rmq.default.svc.cluster.local",
                         "--batch-size",
-                        params.batch_size,
+                        std.toString(params.batch_size),
                         "--learning-rate",
-                        params.learning_rate
+                        std.toString(params.learning_rate)
                     ],
                     "command": [
                         "python3.7",
@@ -88,9 +88,9 @@ local worker(replicas) = {
                                     "--ip",
                                     params.jobname + "-rmq.default.svc.cluster.local",
                                     "--batch-size",
-                                    params.batch_size,
+                                    std.toString(params.batch_size),
                                     "--learning-rate",
-                                    params.learning_rate,
+                                    std.toString(params.learning_rate),
                                     "--exp-dir",
                                     params.expname,
                                     "--job-dir",

@@ -30,9 +30,9 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                             "--ip",
                             params.jobname + "-rmq.default.svc.cluster.local",
                             "--rollout-size",
-                            params.rollout_size,
+                            std.toString(params.rollout_size),
                             "--max-dota-time",
-                            params.max_dota_time
+                            std.toString(params.max_dota_time)
                         ],
                         "command": [
                             "python3.7",
