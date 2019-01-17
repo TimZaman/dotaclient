@@ -1,4 +1,37 @@
 local params = std.extVar("__ksonnet/params").components["dotaservice"];
+
+[{
+    "apiVersion": "v1",
+    "kind": "Service",
+    "metadata": {
+        "labels": {
+            "app": "rmq",
+            "job": params.jobname,
+        },
+        "name": params.jobname + '-rmq',
+    },
+    "spec": {
+        "ports": [
+            {
+                "name": "http",
+                "port": 15672,
+                "protocol": "TCP",
+                "targetPort": 15672
+            },
+            {
+                "name": "amqp",
+                "port": 5672,
+                "protocol": "TCP",
+                "targetPort": 5672
+            }
+        ],
+        "selector": {
+            "app": "rmq",
+            "job": params.jobname,
+        },
+        "type": "ClusterIP"
+    }
+},
 {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
@@ -13,7 +46,8 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
         "replicas": 1,
         "selector": {
             "matchLabels": {
-                "app": "rmq"
+                "app": "rmq",
+                "job": params.jobname
             }
         },
         "template": {
@@ -67,4 +101,4 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
             }
         }
     }
-}
+}]

@@ -13,7 +13,7 @@
       learning_rate: 0.0001,
       max_dota_time: 210,
       optimizers: 1,
-      pretrained_model: '',
+      pretrained_model: 'a/20180115_160800/model_000007163.pt',
       rollout_size: 9999,
     },
   },

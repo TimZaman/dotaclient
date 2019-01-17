@@ -4,6 +4,12 @@ local worker(replicas) = {
     "replicas": std.toString(replicas),
     "restartPolicy": "OnFailure",
     "template": {
+        "metadata": {
+            "labels": {
+                "app": "optimizer",
+                "job": params.jobname,
+            }
+        },
         "spec": {
             "affinity": {
                 "nodeAffinity": {
@@ -53,7 +59,7 @@ local worker(replicas) = {
     "apiVersion": "kubeflow.org/v1beta1",
     "kind": "PyTorchJob",
     "metadata": {
-        "name": "optimizer",
+        "name": params.jobname + "-optimizer",
         "labels": {
             "app": "optimizer",
             "job": params.jobname,
@@ -65,6 +71,12 @@ local worker(replicas) = {
                 "replicas": 1,
                 "restartPolicy": "OnFailure",
                 "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "optimizer",
+                            "job": params.jobname,
+                        }
+                    },
                     "spec": {
                         "affinity": {
                             "nodeAffinity": {
@@ -92,11 +104,11 @@ local worker(replicas) = {
                                     "--learning-rate",
                                     std.toString(params.learning_rate),
                                     "--exp-dir",
-                                    params.expname,
+                                    std.toString(params.expname),
                                     "--job-dir",
-                                    params.jobname,
+                                    std.toString(params.jobname),
                                 ] + if params.pretrained_model == '' then [] else [
-                                    '--pretrained_model', params.pretrained_model ,
+                                    '--pretrained-model', params.pretrained_model ,
                                 ],
                                 "command": [
                                     "python3.7",

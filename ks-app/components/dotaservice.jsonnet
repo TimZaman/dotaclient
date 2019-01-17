@@ -7,13 +7,14 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
             "app": "dotaservice",
             "job": params.jobname,
         },
-        "name": "dotaservice"
+        "name": params.jobname + "-dotaservice"
     },
     "spec": {
         "replicas": params.agents,
         "selector": {
             "matchLabels": {
-                "app": "dotaservice"
+                "app": "dotaservice",
+                "job": params.jobname
             }
         },
         "template": {
