@@ -1,7 +1,9 @@
 from collections import Counter
+from collections import deque
 from datetime import datetime
 import argparse
 import copy
+import gc
 import io
 import logging
 import os
@@ -9,6 +11,7 @@ import pickle
 import re
 import socket
 import time
+import random
 
 from google.cloud import storage
 from tensorboardX import SummaryWriter
@@ -151,7 +154,6 @@ class MessageQueue:
             logger.info('closing queue connection')
             self._conn.close()
 
-
 class Experience:
     def __init__(self, game_id, states, actions, rewards, weight_version, team_id):
         self.game_id = game_id
@@ -160,6 +162,69 @@ class Experience:
         self.rewards = rewards
         self.weight_version = weight_version
         self.team_id = team_id
+
+        self._reward_sums = [sum(r.values()) for r in rewards]
+        self._discounted_rewards = self.discount_rewards(self._reward_sums)
+        self._mh_rewards = self.get_multihead_rewards(self.actions, self._discounted_rewards)
+
+        self.total_reward = sum(self._reward_sums)
+        self.steps = len(rewards)
+
+    def update_reward_counter(self, c):
+        for reward in self.rewards:
+            c.update(reward)
+
+    @property
+    def reward_sums(self):
+        return self._reward_sums
+
+    @property
+    def mh_rewards(self):
+        return self._mh_rewards
+
+    @property
+    def discounted_rewards(self):
+        return self._discounted_rewards
+
+    @staticmethod
+    def discount_rewards(rewards, gamma=0.98):
+        """
+        0.99^70 = 0.5
+        0.98^35 = 0.5
+        """
+        R = 0
+        discounted_rewards = []
+        for r in rewards[::-1]:
+            R = r + gamma * R
+            discounted_rewards.insert(0, R)
+        return torch.tensor(discounted_rewards)
+
+    @staticmethod
+    def get_multihead_rewards(actions, rewards):
+        mh_rewards = []
+        for action, reward in zip(actions, rewards):
+            mh_rewards.extend([reward] * len(action))
+        return torch.stack(mh_rewards)
+
+    def probs(self, policy):
+        """Processes a single experience consisting out of multiple steps.
+        
+        returns a flat list of propbalities, multi-heads are also flattened in.
+        """
+        # Insert the full sequence in one step.
+        head_prob_dict, _ = policy(**self.states, hidden=None)  # -> {heads: tensors}
+
+        probs = []
+        seq_len = len(self.actions)
+        for i in range(seq_len):
+            action = self.actions[i]
+            for k, v in action.items():
+                head_probs = head_prob_dict[k][i]
+                a_prob = head_probs[0, v[0][0]]
+                probs.append(a_prob)
+
+        # Probs is a flat list of probabilities, even for multi-head.
+        return torch.stack(probs)
 
 
 def all_gather(t):
@@ -190,6 +255,13 @@ class DotaOptimizer:
         self.exp_dir = exp_dir
         self.job_dir = job_dir
         self.log_dir = os.path.join(exp_dir, job_dir)
+
+        self.iterations = 99999
+        self.new_samples_per_epoch = batch_size  # HACK
+        self.samples_per_epoch = batch_size  # HACK
+        self.n_epochs = 4  # HACK
+        self.e_clip = 0.2
+
 
         if self.checkpoint:
             # TODO(tzaman): Set logdir ourselves?
@@ -223,6 +295,8 @@ class DotaOptimizer:
         else:
             self.policy = self.policy_base
 
+        self.policy_old = copy.deepcopy(self.policy)
+
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
 
@@ -254,25 +328,12 @@ class DotaOptimizer:
     def events_filename(self):
         return self.writer.file_writer.event_writer._ev_writer._file_name
 
-    @staticmethod
-    def discount_rewards(rewards, gamma=0.98):
-        """
-        0.99^70 = 0.5
-        0.98^35 = 0.5
-        """
-        R = 0
-        discounted_rewards = []
-        for r in rewards[::-1]:
-            R = r + gamma * R
-            discounted_rewards.insert(0, R)
-        return torch.tensor(discounted_rewards)
-
     def normalize(self, t):
         t -= t.mean()
         t /= (t.std() + eps)
         return t
 
-    def finish_episode(self, probs, rewards):
+    def optimize(self, probs, rewards):
         log_probs = torch.log(probs)
         loss = torch.mul(-log_probs, rewards)
         self.optimizer.zero_grad()
@@ -280,149 +341,144 @@ class DotaOptimizer:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
-
         return loss
 
-    def get_multihead_rewards(self, actions, rewards):
-        mh_rewards = []
-        for action, reward in zip(actions, rewards):
-            mh_rewards.extend([reward] * len(action))
-        return torch.stack(mh_rewards)
-
-    def process_rollout(self, states, actions):
-        """Processes a single experience consisting out of multiple steps.
-        
-        returns a flat list of propbalities, multi-heads are also flattened in.
-        """
-        # Insert the full sequence in one step.
-        head_prob_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
-
-        probs = []
-        seq_len = len(actions)
-        for i in range(seq_len):
-            action = actions[i]
-            for k, v in action.items():
-                head_probs = head_prob_dict[k][i]
-                a_prob = head_probs[0, v[0][0]]
-                probs.append(a_prob)
-
-        # Probs is a flat list of probabilities, even for multi-head.
-        return torch.stack(probs)
-
-    def run(self):
-        while True:
-            experiences = []
-            for _ in range(self.batch_size):
-                method, properties, body = self.mq.consume_xp()
-                data = pickle.loads(body)
-                experience = Experience(
-                    game_id=data['game_id'],
-                    states=data['states'],
-                    actions=data['actions'],
-                    rewards=data['rewards'],
-                    weight_version=data['weight_version'],
-                    team_id=data['team_id'],
-                    )
-                experiences.append(experience)
-            self.step(experiences=experiences)
-
-    def step(self, experiences):
-        logger.info('::step episode={}'.format(self.episode))
-        
-        # Get item form queue
-        all_reward_sums = []
-        # all_discounted_rewards = {TEAM_RADIANT: [], TEAM_DIRE: []}
-        # all_logprobs = {TEAM_RADIANT: [], TEAM_DIRE: []}
-        # all_rewards = []
-        reward_counter = Counter()
-        weight_ages = []
-        teams = []
-        n_steps = 0
-
-        all_states = []
-        all_actions = []
-
-        all_mh_rewards = []
-        all_probs = []
-
-        # Loop over each experience
-        for experience in experiences:
-            self.mq.process_data_events()
-
-            for reward in experience.rewards:  # Steps in a batch.
-                reward_counter.update(reward)
-
-            reward_sums = [sum(r.values()) for r in experience.rewards]
-            discounted_rewards = self.discount_rewards(reward_sums)
-            mh_rewards = self.get_multihead_rewards(experience.actions, discounted_rewards)
-            all_mh_rewards.append(mh_rewards)
-
-            probs = self.process_rollout(
-                states=experience.states,
-                actions=experience.actions,
+    @staticmethod
+    def data_to_experience(data):
+        return Experience(
+            game_id=data['game_id'],
+            states=data['states'],
+            actions=data['actions'],
+            rewards=data['rewards'],
+            weight_version=data['weight_version'],
+            team_id=data['team_id'],
             )
 
-            all_probs.append(probs)
- 
-            # Non functional (metrics):
-            all_reward_sums.append(sum(reward_sums))
+    def run(self):
+        assert self.new_samples_per_epoch >= self.batch_size
+        assert self.samples_per_epoch % self.batch_size == 0
+
+        # experiences = [] # deque(maxlen=self.samples_per_epoch)
+
+        for it in range(self.iterations):
+            self._run(it=it)
+
+    def _run(self, it):
+        gc.collect()
+        logger.info('iteration #{}'.format(it))
+        
+        # Metrics
+        reward_counter = Counter()
+        teams = []
+        weight_ages = []
+        reward_sums = []
+        losses = []
+
+        # Add some experiences to the deque
+        experiences = []
+        for s in range(self.new_samples_per_epoch):
+            logger.debug(' adding experience {}/{}'.format(s + 1, self.new_samples_per_epoch))
+            method, properties, body = self.mq.consume_xp()
+            data = pickle.loads(body)
+            experience = self.data_to_experience(data)
+
+            # Metrics
+            experience.update_reward_counter(c=reward_counter)
+            reward_sums.append(experience.total_reward)
             teams.append(experience.team_id)
-            weight_ages.append(self.episode - experience.weight_version)
-            n_steps += len(reward_sums)
+            weight_ages.append(it - experience.weight_version)
 
+            # Add to dequeue.
+            experiences.append(experience)  
+            
+        # Set the original policy (that we're not updating)
+        self.policy_old.load_state_dict(self.policy.state_dict())
 
-        # policy_old = copy.deepcopy(self.policy)
-        # policy_old.load_state_dict(self.policy.state_dict())
+        # Go over each epoch
+        n_steps = 0
+        n_batches = 0
+        for e in range(self.n_epochs):
+            self.policy.zero_grad()
+            self.mq.process_data_events()
+            logger.debug(' epoch {}/{}'.format(e + 1, self.n_epochs))
+            # TODO: Shuffle this epoch
+            indices = list(range(len(experiences)))
+            random.shuffle(indices)
+            steps_per_epoch =  len(experiences) // self.batch_size
+            n_batches += steps_per_epoch
+            for b in range(steps_per_epoch):
+                logger.debug('  batch {}/{}'.format(b + 1, steps_per_epoch))
+                start_index = b * self.batch_size
+                batch = [experiences[i] for i in indices[start_index:start_index + self.batch_size]]
+                n_steps += sum([e.steps for e in batch])
 
-        # n_epochs = 4
-        # for epoch in range(n_epochs):
-        #     mb_pis, mb_vs = self.policy(mb_obs)
-        #     mb_pi_olds, mb_v_olds = self.policy_old(mb_obs)
+                # Normalize rewards
+                rewards = [experience.mh_rewards for experience in batch]
+                rewards = torch.cat(rewards)
+                rewards = self.normalize(t=rewards)
 
-        all_probs = torch.cat(all_probs)
-        all_mh_rewards = torch.cat(all_mh_rewards)
+                # Get original probabilities
+                probs_old = torch.cat([experience.probs(policy=self.policy_old) for experience in batch])
+                probs_old.detach()
 
-        all_norm_mh_rewards = self.normalize(all_mh_rewards)
+                # Get new probabilities
+                probs = torch.cat([experience.probs(policy=self.policy) for experience in batch])
 
-        loss = self.finish_episode(probs=all_probs, rewards=all_norm_mh_rewards)
+                # Probability ratio
+                rt = probs / (probs_old + eps)
 
-        self.episode += 1
+                # PPO Objective
+                surr1 = rt * rewards
+                surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * rewards
+                loss = -torch.min(surr1, surr2).mean()
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
+                self.optimizer.step()
+
+                losses.append(loss)
+
+        # Metrics
 
         steps_per_s = n_steps / (time.time() - self.time_last_step)
         self.time_last_step = time.time()
 
-        avg_weight_age = sum(weight_ages) / self.batch_size
+        avg_weight_age = sum(weight_ages) / len(weight_ages)
 
         reward_counter = dict(reward_counter)
 
         reward_sum = sum(reward_counter.values())
-        mean_reward = reward_sum / self.batch_size
+        mean_reward = reward_sum / self.new_samples_per_epoch
 
+        losses = torch.stack(losses)
+        loss = losses.mean()
         logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}, loss={:.4f}'.format(
-            steps_per_s, avg_weight_age, mean_reward, loss))
+            steps_per_s, avg_weight_age, mean_reward, float(loss)))
 
         speed_key = 'steps per s'
         metrics = {
+            'steps/batch': n_steps / n_batches,
             speed_key: steps_per_s,
             'mean_reward': mean_reward,
             'loss': loss,
         }
         for k, v in reward_counter.items():
-            metrics['reward_{}'.format(k)] = v / self.batch_size
+            metrics['reward_{}'.format(k)] = v / self.new_samples_per_epoch
 
         # Reduce all the metrics
         metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
 
         weight_ages = torch.tensor(weight_ages)
         teams = torch.tensor(teams)
-        all_reward_sums = torch.tensor(all_reward_sums)
+        reward_sums = torch.tensor(reward_sums)
         if is_distributed():
             dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
             metrics_t /= dist.get_world_size()
 
             weight_ages = all_gather(weight_ages)
             teams = all_gather(teams)
-            all_reward_sums = all_gather(all_reward_sums)
+            reward_sums = all_gather(reward_sums)
 
         metrics_d = dict(zip(metrics.keys(), metrics_t))
 
@@ -433,38 +489,42 @@ class DotaOptimizer:
         if self.checkpoint:
             # Write metrics to events file.
             for name, metric in metrics_d.items():
-                self.writer.add_scalar(name, metric, self.episode)
+                self.writer.add_scalar(name, metric, it)
             
+            # Loss histogram
+            self.writer.add_histogram('losses', losses, it)
+
             # Age histogram
-            self.writer.add_histogram('weight_age', weight_ages, self.episode)
+            self.writer.add_histogram('weight_age', weight_ages, it)
 
             # Rewards histogram
-            self.writer.add_histogram('rewards_radiant', all_reward_sums[teams==TEAM_RADIANT], self.episode)
-            self.writer.add_histogram('rewards_dire', all_reward_sums[teams==TEAM_DIRE], self.episode)
+            self.writer.add_histogram('rewards_radiant', reward_sums[teams==TEAM_RADIANT], it)
+            self.writer.add_histogram('rewards_dire', reward_sums[teams==TEAM_DIRE], it)
 
             # Model
-            if self.episode % self.MODEL_HISTOGRAM_FREQ == 1:
+            if it % self.MODEL_HISTOGRAM_FREQ == 1:
                 for name, param in self.policy_base.named_parameters():
-                    self.writer.add_histogram(name, param.clone().cpu().data.numpy(), self.episode)
+                    self.writer.add_histogram(name, param.clone().cpu().data.numpy(), it)
 
             # RMQ Queue size.
             queue_size = self.mq.xp_queue_size
             if queue_size is not None:
-                self.writer.add_scalar('mq_size', queue_size, self.episode)
+                self.writer.add_scalar('mq_size', queue_size, it)
 
             # Upload events to GCS
             self.writer.file_writer.flush()  # Flush before uploading
             blob = self.bucket.blob(self.events_filename)
             blob.upload_from_filename(filename=self.events_filename)
 
-            self.upload_model()
+            self.upload_model(version=it)
 
-    def upload_model(self):
+
+    def upload_model(self, version):
         if not is_master():
             # Only rank 0 uploads the model.
             return
 
-        filename = self.MODEL_FILENAME_FMT % self.episode
+        filename = self.MODEL_FILENAME_FMT % version
         rel_path = os.path.join(self.log_dir, filename)
 
         # Serialize the model.
@@ -478,7 +538,7 @@ class DotaOptimizer:
             f.write(state_dict_b)
 
         # Send to exchange.
-        self.mq.publish_model(msg=state_dict_b, hdr={'version': self.episode})
+        self.mq.publish_model(msg=state_dict_b, hdr={'version': version})
 
         # Upload to GCP.
         blob = self.bucket.blob(rel_path)
@@ -521,7 +581,7 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_pre
     )
 
     # Upload initial model.
-    dota_optimizer.upload_model()
+    dota_optimizer.upload_model(version=0)
 
     dota_optimizer.run()
 
