@@ -106,7 +106,7 @@ def get_reward(prev_obs, obs, player_id):
     mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
     mid_tower = get_mid_tower(obs, team_id=player.team_id)
 
-    reward = {}
+    reward = {'win': 0}
 
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
@@ -217,6 +217,12 @@ def get_mid_tower(state, team_id):
 
 
 class Player:
+
+    END_STATUS_TO_TEAM = {
+        Status.Value('RADIANT_WIN'): TEAM_RADIANT,
+        Status.Value('DIRE_WIN'): TEAM_DIRE,
+    }
+
     def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_model):
         self.game_id = game_id
         self.player_id = player_id
@@ -250,6 +256,16 @@ class Player:
         reward_sum = sum(reward_counter.values())
         logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
             self.player_id, reward_sum, pformat(reward_counter)))
+
+    def process_endstate(self, end_state):
+        # The end-state adds rewards to the last reward.
+        if not self.rewards:
+            return
+        if end_state in self.END_STATUS_TO_TEAM.keys():
+            if self.team_id == self.END_STATUS_TO_TEAM[end_state]:
+                self.rewards[-1]['win'] = 1
+            else:
+                self.rewards[-1]['win'] = -1
 
     @staticmethod
     def pack_policy_inputs(inputs):
@@ -515,6 +531,7 @@ class Game:
         done = False
         step = 0
         dota_time = -float('Inf')
+        end_state = None
         while dota_time < self.max_dota_time:
             for team_id, player in players.items():
                 logger.debug('dota_time={:.2f}, team={}'.format(dota_time, team_id))
@@ -522,6 +539,7 @@ class Game:
 
                 response = await self.dota_service.observe(ObserveConfig(team_id=team_id))
                 if response.status != Status.Value('OK'):
+                    end_state = response.status
                     done = True
                     break
                 obs = response.world_state
@@ -550,7 +568,12 @@ class Game:
 
             if done:
                 break
+
+        if end_state is not None:
             
+            for player in players.values():
+                player.process_endstate(end_state)
+
 
         # Final rollout. Probably partial.
         for player in players.values():
