@@ -45,8 +45,8 @@ local worker(replicas) = {
                     "name": "pytorch",
                     "resources": {
                         "requests": {
-                            "cpu": "300m",
-                            "memory": "2048Mi"
+                            "cpu": "600m",
+                            "memory": "4096Mi"
                         }
                     }
                 }
@@ -124,8 +124,8 @@ local worker(replicas) = {
                                 "name": "pytorch",
                                 "resources": {
                                     "requests": {
-                                        "cpu": "200m",
-                                        "memory": "2048Mi"
+                                        "cpu": "600m",
+                                        "memory": "4096Mi"
                                     }
                                 },
                                 "volumeMounts": [

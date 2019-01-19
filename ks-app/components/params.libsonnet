@@ -4,16 +4,16 @@
     // Component-level parameters, defined initially from 'ks prototype use ...'
     // Each object below should correspond to a component in the components/ directory
     dotaservice: {
-      agents: 6,
+      agents: 5,
       batch_size: 8,
       dotaclient_image_tag: 'latest',
       dotaservice_image_tag: '0.3.5',
       expname: 'exp1',
-      jobname: 'job8-ppo',
+      jobname: 'job11-ppo',
       learning_rate: '2e-6',
-      max_dota_time: 210,
+      max_dota_time: 300,
       optimizers: 1,
-      pretrained_model: 'exp1/job6-ppo/model_000001578.pt',
+      pretrained_model: 'exp1/job10-ppo/model_000000013.pt',
       rollout_size: 9999,
     },
   },
