@@ -160,6 +160,16 @@ class WeightStore:
     def latest_model(self):
         return self.weights[-1]
 
+    def load_from_gcs(self, model):
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.get_bucket('dotaservice')
+        model_blob = bucket.get_blob(model)
+        tmp_model = '/tmp/model.pt'
+        model_blob.download_to_filename(tmp_model)
+        state_dict = torch.load(tmp_model)
+        self.add(version=-1, state_dict=state_dict)
+        self.ready.set()
 
 weight_store = WeightStore(maxlen=MAX_AGE_WEIGHTSTORE)
 
@@ -585,7 +595,7 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_prob):
+async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_prob, initial_model):
     logger.info('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
@@ -593,6 +603,10 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_pro
     experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 
     weight_store.ready = asyncio.Event(loop=asyncio.get_event_loop())
+
+    # Optionally
+    if initial_model:
+        weight_store.load_from_gcs(initial_model)
 
     # Set up the model callback.
     await setup_model_cb(host=rmq_host, port=rmq_port)
@@ -630,6 +644,7 @@ if __name__ == '__main__':
     parser.add_argument("--max-dota-time", type=int, help="Maximum in-game (dota) time of a game before restarting", default=600)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
+    parser.add_argument("--model", type=str, help="Initial model to immediatelly start")
     parser.add_argument("--use-latest-model-prob", type=float,
                         help="Probability of using the latest model. Otherwise some old one is chosen if available.", default=1.0)
     args = parser.parse_args()
@@ -637,4 +652,5 @@ if __name__ == '__main__':
     logger.setLevel(args.log_level)
 
     asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
-                     max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob))
+                     max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob,
+                     initial_model=args.model))
