@@ -93,7 +93,7 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                         "resources": {
                             "requests": {
                                 "cpu": "200m",
-                                "memory": "1408Mi"
+                                "memory": "1024Mi"
                             }
                         }
                     }

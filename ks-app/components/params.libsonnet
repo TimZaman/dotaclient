@@ -5,15 +5,15 @@
     // Each object below should correspond to a component in the components/ directory
     dotaservice: {
       agents: 5,
-      batch_size: 8,
+      batch_size: 4,
       dotaclient_image_tag: 'latest',
       dotaservice_image_tag: '0.3.5',
       expname: 'exp1',
-      jobname: 'job11-ppo',
+      jobname: 'job14-ppo',
       learning_rate: '2e-6',
       max_dota_time: 300,
       optimizers: 1,
-      pretrained_model: 'exp1/job10-ppo/model_000000013.pt',
+      pretrained_model: 'exp1/job13-ppo/model_000001385.pt',
       rollout_size: 9999,
     },
   },

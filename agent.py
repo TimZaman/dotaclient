@@ -38,6 +38,7 @@ logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 
 # Static variables
+REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']
 OPPOSITE_TEAM = {TEAM_DIRE: TEAM_RADIANT, TEAM_RADIANT: TEAM_DIRE}
 
 TICKS_PER_OBSERVATION = 15
@@ -106,7 +107,8 @@ def get_reward(prev_obs, obs, player_id):
     mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
     mid_tower = get_mid_tower(obs, team_id=player.team_id)
 
-    reward = {'win': 0}
+    # TODO(tzaman): make a nice reward container?
+    reward = {key: 0. for key in REWARD_KEYS}
 
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
@@ -241,7 +243,7 @@ class Player:
         self.use_latest_model= use_latest_model
 
         self.policy_inputs = []
-        self.action_dicts = []
+        self.actions = []
         self.rewards = []
         self.hidden = None
 
@@ -294,20 +296,30 @@ class Player:
             d[k] = torch.stack(v)
         return d
 
+    @staticmethod
+    def pack_rewards(inputs):
+        """Pack a list or reward dicts into a dense 2D tensor"""
+        t = np.zeros([len(inputs), len(REWARD_KEYS)])
+        for i, reward in enumerate(inputs):
+            for ir, key in enumerate(REWARD_KEYS):
+                t[i, ir] = reward[key]
+        return t
+
     def _send_experience_rmq(self):
         logger.debug('_send_experience_rmq')
 
         # Pack all the policy inputs into dense tensors
 
         packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
+        packed_rewards = self.pack_rewards(inputs=self.rewards)
 
         data = pickle.dumps({
             'game_id': self.game_id,
             'team_id': self.team_id,
             'player_id': self.player_id,
             'states': packed_policy_inputs,
-            'actions': self.action_dicts,
-            'rewards': self.rewards,
+            'actions': torch.stack(self.actions),  # stack or cat?
+            'rewards': packed_rewards,
             'weight_version': self.policy.weight_version,
         })
         self.experience_channel.basic_publish(
@@ -330,24 +342,24 @@ class Player:
 
         # Reset states.
         self.policy_inputs = []
-        self.action_dicts = []
+        self.actions = []
         self.rewards = []
 
     @staticmethod
-    def unit_matrix(state, hero_unit, team_id, unit_types, only_self=False):
+    def unit_matrix(state, hero_unit, team_id, unit_types, only_self=False, max_units=16):
         # We are always inserting an 'zero' unit to make sure the policy doesn't barf
         # We can't just pad this, because we will otherwise lose track of corresponding chosen
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
-        handles = torch.full([Policy.MAX_UNITS], -1)
-        m = torch.zeros(Policy.MAX_UNITS, 8)
+        handles = torch.full([max_units], -1)
+        m = torch.zeros(max_units, 8)
         i = 0
         for unit in state.units:
             if unit.team_id == team_id and unit.is_alive and unit.unit_type in unit_types:
                 if only_self:
                     if unit != hero_unit:
                         continue
-                if i >= Policy.MAX_UNITS:
+                if i >= max_units:
                     break
                 rel_hp = (unit.health / unit.health_max) - 0.5
                 loc_x = unit.location.x / 7000.
@@ -372,8 +384,6 @@ class Player:
         return m, handles
 
     def select_action(self, world_state, hidden):
-        actions = {}
-
         # Preprocess the state
         hero_unit = get_unit(world_state, player_id=self.player_id)
 
@@ -390,6 +400,7 @@ class Player:
             unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
             team_id=hero_unit.team_id,
             only_self=True,  # For now, ignore teammates.
+            max_units=1,
         )
 
         enemy_heroes, enemy_hero_handles = self.unit_matrix(
@@ -397,6 +408,7 @@ class Player:
             hero_unit=hero_unit,
             unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
             team_id=OPPOSITE_TEAM[hero_unit.team_id],
+            max_units=5,
         )
 
         allied_nonheroes, allied_nonhero_handles = self.unit_matrix(
@@ -407,6 +419,7 @@ class Player:
                 CMsgBotWorldState.UnitType.Value('CREEP_HERO')
             ],
             team_id=hero_unit.team_id,
+            max_units=16,
         )
 
         enemy_nonheroes, enemy_nonhero_handles = self.unit_matrix(
@@ -418,6 +431,7 @@ class Player:
                 CMsgBotWorldState.UnitType.Value('HERO')
             ],
             team_id=OPPOSITE_TEAM[hero_unit.team_id],
+            max_units=16,
         )
 
         unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles])
@@ -435,6 +449,9 @@ class Player:
         logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
 
         action_dict = self.policy.select_actions(head_prob_dict=head_prob_dict)
+
+        # print('flatten_selections=', self.policy.flatten_selections(action_dict))
+        # print('flatten_action_dict=', self.policy.flatten_action_dict(head_prob_dict))
 
         return action_dict, policy_input, unit_handles, hidden
 
@@ -476,9 +493,10 @@ class Player:
             hidden=self.hidden,
         )
 
-        self.policy_inputs.append(policy_input)
-        self.action_dicts.append(action_dict)
+        self.actions.append(self.policy.flatten_selections(action_dict))
 
+        self.policy_inputs.append(policy_input)
+  
         logger.debug('action:\n' + pformat(action_dict))
 
         action_pb = self.action_to_pb(action_dict=action_dict, state=obs, unit_handles=unit_handles)

@@ -17,6 +17,7 @@ from google.cloud import storage
 from tensorboardX import SummaryWriter
 import numpy as np
 import pika
+import scipy.signal
 import torch
 import torch.distributed as dist
 
@@ -43,6 +44,14 @@ def is_master():
         return torch.distributed.get_rank() == 0
     else:
         return True
+
+
+def discount(x, gamma):
+    return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1].astype(np.float32)
+
+
+def normalize(x):
+    return (x - x.mean()) / (x.std() + eps)
 
 
 class MessageQueue:
@@ -155,76 +164,44 @@ class MessageQueue:
             self._conn.close()
 
 class Experience:
-    def __init__(self, game_id, states, actions, rewards, weight_version, team_id):
+    def __init__(self, game_id, states, actions, rewards, weight_version, team_id, seq_len):
         self.game_id = game_id
-        self.states = states
-        self.actions = actions
-        self.rewards = rewards
         self.weight_version = weight_version
         self.team_id = team_id
+        self.seq_len = seq_len
 
-        self._reward_sums = [sum(r.values()) for r in rewards]
-        self._discounted_rewards = self.discount_rewards(self._reward_sums)
-        self._mh_rewards = self.get_multihead_rewards(self.actions, self._discounted_rewards)
+        # TODO(tzaman): Like here, we need to calculate advantage before any padding or slicing.
+        reward_sum = np.sum(rewards, axis=1)
+        advantage = discount(x=reward_sum, gamma=0.98)
 
-        self.total_reward = sum(self._reward_sums)
-        self.steps = len(rewards)
+        # HACK: Slice to a standard length
+        self.rewards = rewards[:self.seq_len, :]
+        self.advantage = advantage[:self.seq_len]
+        self.actions = actions[:self.seq_len, :]
+        self.states = {key: None for key in Policy.INPUT_KEYS}
+        for key in self.states:
+            self.states[key] = states[key][:self.seq_len, :]
 
-    def update_reward_counter(self, c):
-        for reward in self.rewards:
-            c.update(reward)
+        # Calculate stuff
+        self.total_reward = np.sum(self.rewards)
 
-    @property
-    def reward_sums(self):
-        return self._reward_sums
+        # Create a vector with the n-hot mask of actions.
+        self.vec_action_mask = self.actions.view(-1)
 
-    @property
-    def mh_rewards(self):
-        return self._mh_rewards
+        # Count the amount of (multi-head) actions taken for each step.
+        action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
+        vec_rewards = np.ravel(self.advantage)  # flat view
+        # Repeat the rewards where a step has multiple actions, the reward gets repeated.
+        self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
 
-    @property
-    def discounted_rewards(self):
-        return self._discounted_rewards
+    def get_old_probs(self, policy):
+        head_prob_dict, _ = policy.sequence(**self.states, hidden=None)
+        flat_probs = policy.flatten_action_dict(head_prob_dict)
+        vec_probs_all = flat_probs.view(-1)
 
-    @staticmethod
-    def discount_rewards(rewards, gamma=0.98):
-        """
-        0.99^70 = 0.5
-        0.98^35 = 0.5
-        """
-        R = 0
-        discounted_rewards = []
-        for r in rewards[::-1]:
-            R = r + gamma * R
-            discounted_rewards.insert(0, R)
-        return torch.tensor(discounted_rewards)
-
-    @staticmethod
-    def get_multihead_rewards(actions, rewards):
-        mh_rewards = []
-        for action, reward in zip(actions, rewards):
-            mh_rewards.extend([reward] * len(action))
-        return torch.stack(mh_rewards)
-
-    def probs(self, policy):
-        """Processes a single experience consisting out of multiple steps.
-        
-        returns a flat list of propbalities, multi-heads are also flattened in.
-        """
-        # Insert the full sequence in one step.
-        head_prob_dict, _ = policy(**self.states, hidden=None)  # -> {heads: tensors}
-
-        probs = []
-        seq_len = len(self.actions)
-        for i in range(seq_len):
-            action = self.actions[i]
-            for k, v in action.items():
-                head_probs = head_prob_dict[k][i]
-                a_prob = head_probs[0, v[0][0]]
-                probs.append(a_prob)
-
-        # Probs is a flat list of probabilities, even for multi-head.
-        return torch.stack(probs)
+        # Now mask the probs by the selection
+        self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
+        self.vec_old_probs = self.vec_old_probs.detach()
 
 
 def all_gather(t):
@@ -240,31 +217,29 @@ class DotaOptimizer:
     RUNNING_NORM_FACTOR = 0.95
     MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
+    SPEED_KEY = 'steps per s'
 
-    def __init__(self, rmq_host, rmq_port, batch_size, learning_rate, checkpoint, pretrained_model,
-                 mq_prefetch_count, exp_dir, job_dir):
+    def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
+                 learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
+        self.epochs = epochs
+        self.seq_per_epoch = seq_per_epoch
         self.batch_size = batch_size
+        self.seq_len = seq_len
         self.learning_rate = learning_rate
         self.checkpoint = checkpoint
         self.mq_prefetch_count = mq_prefetch_count
-        self.episode = 0
+        self.iteration_start = 0
         self.policy_base = Policy()
         self.exp_dir = exp_dir
         self.job_dir = job_dir
         self.log_dir = os.path.join(exp_dir, job_dir)
-
-        self.iterations = 99999
-        self.new_samples_per_epoch = batch_size  # HACK
-        self.samples_per_epoch = batch_size  # HACK
-        self.n_epochs = 4  # HACK
+        self.iterations = 10000
         self.e_clip = 0.2
 
-
         if self.checkpoint:
-            # TODO(tzaman): Set logdir ourselves?
             self.writer = SummaryWriter(log_dir=self.log_dir)
             logger.info('Checkpointing to: {}'.format(self.log_dir))
             client = storage.Client()
@@ -275,7 +250,7 @@ class DotaOptimizer:
             # If there's a model in here, we resume from there
             if latest_model is not None:
                 logger.info('Found a latest model in pretrained dir: {}'.format(latest_model))
-                self.episode = self.episode_from_model_filename(filename=latest_model)
+                self.iteration_start = self.iteration_from_model_filename(filename=latest_model)
                 if pretrained_model is not None:
                     logger.warning('Overriding pretrained model by latest model.')
                 pretrained_model = latest_model
@@ -306,7 +281,7 @@ class DotaOptimizer:
         self.mq.connect()
 
     @staticmethod
-    def episode_from_model_filename(filename):
+    def iteration_from_model_filename(filename):
         x = re.search('(\d+)(?=.pt)', filename)
         return int(x.group(0))
 
@@ -328,11 +303,6 @@ class DotaOptimizer:
     def events_filename(self):
         return self.writer.file_writer.event_writer._ev_writer._file_name
 
-    def normalize(self, t):
-        t -= t.mean()
-        t /= (t.std() + eps)
-        return t
-
     def optimize(self, probs, rewards):
         log_probs = torch.log(probs)
         loss = torch.mul(-log_probs, rewards)
@@ -343,8 +313,7 @@ class DotaOptimizer:
         self.optimizer.step()
         return loss
 
-    @staticmethod
-    def data_to_experience(data):
+    def data_to_experience(self, data):
         return Experience(
             game_id=data['game_id'],
             states=data['states'],
@@ -352,21 +321,156 @@ class DotaOptimizer:
             rewards=data['rewards'],
             weight_version=data['weight_version'],
             team_id=data['team_id'],
+            seq_len = self.seq_len
             )
 
     def run(self):
-        assert self.new_samples_per_epoch >= self.batch_size
-        assert self.samples_per_epoch % self.batch_size == 0
+        assert self.seq_per_epoch >= self.batch_size
+        assert self.seq_per_epoch % self.batch_size == 0
 
-        # experiences = [] # deque(maxlen=self.samples_per_epoch)
+        for it in range(self.iteration_start, self.iterations):
+            logger.info('iteration {}/{}'.format(it + 1, self.iterations))
 
-        for it in range(self.iterations):
-            self._run(it=it)
+            # First grab a bunch of experiences
+            experiences = []
+            rewards = []
+            for s in range(self.seq_per_epoch):
+                logger.debug(' adding experience {}/{}'.format(s + 1, self.seq_per_epoch))
 
-    def _run(self, it):
-        gc.collect()
-        logger.info('iteration #{}'.format(it))
-        
+                # Grab a rollout
+                while True:
+                    method, properties, body = self.mq.consume_xp()
+                    data = pickle.loads(body)
+                    l = data['actions'].size(0)
+                    if  l >= self.seq_len:
+                        break
+                    else:
+                        logger.warning('Skipping short sequence (length={})'.format(l))
+
+                # TODO(tzaman): The rollout can consist out of multiple viable sequences.
+                # These should be padded and then sliced into separate experiences.
+                experience = self.data_to_experience(data)
+                experience.get_old_probs(policy=self.policy_old)
+                rewards.append(experience.total_reward)
+                experiences.append(experience)
+
+            assert len(experiences) % self.batch_size == 0
+
+            losses = []
+            for ep in range(self.epochs):
+                logger.debug(' epoch {}/{}'.format(ep + 1, self.epochs))
+                self.mq.process_data_events()
+
+                # Shuffle the list of experience chunks.
+                random.shuffle(experiences)
+
+                # Divide into batches
+                batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
+                for batch in batches:
+                    losses.append(self.train(experiences=batch))
+            
+            # Set the new policy as the old one.
+            self.policy_old.load_state_dict(self.policy.state_dict())
+
+            losses = torch.stack(losses)
+            loss = losses.mean()
+
+            n_steps = self.seq_per_epoch * self.seq_len
+            steps_per_s = n_steps / (time.time() - self.time_last_step)
+            self.time_last_step = time.time()
+
+            avg_weight_age = 0.  # TODO
+            mean_reward = sum(rewards) / len(rewards)  # TODO
+
+            metrics = {
+                self.SPEED_KEY: steps_per_s,
+                'mean_reward': mean_reward,
+                'loss': loss,
+            }
+
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}, loss={:.4f}'.format(
+                steps_per_s, avg_weight_age, mean_reward, float(loss)))
+
+            if self.checkpoint:
+                # Write metrics to events file.
+                for name, metric in metrics.items():
+                    self.writer.add_scalar(name, metric, it)
+                
+                # Loss histogram
+                self.writer.add_histogram('losses', losses, it)
+
+                # Age histogram
+                # self.writer.add_histogram('weight_age', weight_ages, it)
+
+                # Rewards histogram
+                # self.writer.add_histogram('rewards_radiant', reward_sums[teams==TEAM_RADIANT], it)
+                # self.writer.add_histogram('rewards_dire', reward_sums[teams==TEAM_DIRE], it)
+
+                # Model
+                if it % self.MODEL_HISTOGRAM_FREQ == 1:
+                    for name, param in self.policy_base.named_parameters():
+                        self.writer.add_histogram(name, param.clone().cpu().data.numpy(), it)
+
+                # RMQ Queue size.
+                queue_size = self.mq.xp_queue_size
+                if queue_size is not None:
+                    self.writer.add_scalar('mq_size', queue_size, it)
+
+                # Upload events to GCS
+                self.writer.file_writer.flush()  # Flush before uploading
+                blob = self.bucket.blob(self.events_filename)
+                blob.upload_from_filename(filename=self.events_filename)
+
+                self.upload_model(version=it)
+
+    def train(self, experiences):
+        # Train on one epoch of data.
+        # Experiences is a list of (padded) experience chunks.
+        logger.debug('train(experiences={})'.format(experiences))
+
+        # Batch together all experiences.
+        vec_mh_rewards = torch.cat([e.vec_mh_rewards for e in experiences])
+        vec_action_mask = torch.cat([e.vec_action_mask for e in experiences])
+        vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
+
+        # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
+        # pre-calculated mean and eps scalars to normalize by, since we will be going over this
+        # each piece of experience an 'episode' amount of times.
+        vec_mh_rewards = normalize(vec_mh_rewards)
+
+        states = {key: [] for key in Policy.INPUT_KEYS}
+        for e in experiences:
+            for key in e.states:
+                states[key].append(e.states[key])
+        states = {key: torch.stack(states[key]) for key in states}
+
+
+        head_prob_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
+        flat_probs = self.policy.flatten_action_dict(head_prob_dict)
+        vec_probs_all = flat_probs.view(-1)
+
+        # Now mask the probs by the selection
+        vec_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
+
+        # Probability ratio
+        rt = vec_probs / (vec_old_probs + eps)
+
+        # PPO Objective
+        surr1 = rt * vec_mh_rewards
+        surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards
+        loss = -torch.min(surr1, surr2).mean()
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
+        self.optimizer.step()
+        return loss
+
+
+
+
+    def _unused(self, it):
+
         # Metrics
         reward_counter = Counter()
         teams = []
@@ -374,22 +478,22 @@ class DotaOptimizer:
         reward_sums = []
         losses = []
 
-        # Add some experiences to the deque
-        experiences = []
-        for s in range(self.new_samples_per_epoch):
-            logger.debug(' adding experience {}/{}'.format(s + 1, self.new_samples_per_epoch))
-            method, properties, body = self.mq.consume_xp()
-            data = pickle.loads(body)
-            experience = self.data_to_experience(data)
+        # Add some experiences to the
+        # experiences = []
+        # for s in range(self.seq_per_epoch):
+        #     logger.debug(' adding experience {}/{}'.format(s + 1, self.seq_per_epoch))
+        #     method, properties, body = self.mq.consume_xp()
+        #     data = pickle.loads(body)
+        #     experience = self.data_to_experience(data)
 
-            # Metrics
-            experience.update_reward_counter(c=reward_counter)
-            reward_sums.append(experience.total_reward)
-            teams.append(experience.team_id)
-            weight_ages.append(it - experience.weight_version)
+        #     # Metrics
+        #     experience.update_reward_counter(c=reward_counter)
+        #     reward_sums.append(experience.total_reward)
+        #     teams.append(experience.team_id)
+        #     weight_ages.append(it - experience.weight_version)
 
-            # Add to dequeue.
-            experiences.append(experience)  
+        #     # Add to dequeue.
+        #     experiences.append(experience)  
             
         # Set the original policy (that we're not updating)
         self.policy_old.load_state_dict(self.policy.state_dict())
@@ -397,10 +501,10 @@ class DotaOptimizer:
         # Go over each epoch
         n_steps = 0
         n_batches = 0
-        for e in range(self.n_epochs):
+        for e in range(self.epochs):
             self.policy.zero_grad()
             self.mq.process_data_events()
-            logger.debug(' epoch {}/{}'.format(e + 1, self.n_epochs))
+            logger.debug(' epoch {}/{}'.format(e + 1, self.epochs))
             # TODO: Shuffle this epoch
             indices = list(range(len(experiences)))
             random.shuffle(indices)
@@ -449,7 +553,7 @@ class DotaOptimizer:
         reward_counter = dict(reward_counter)
 
         reward_sum = sum(reward_counter.values())
-        mean_reward = reward_sum / self.new_samples_per_epoch
+        mean_reward = reward_sum / self.seq_per_epoch
 
         losses = torch.stack(losses)
         loss = losses.mean()
@@ -464,7 +568,7 @@ class DotaOptimizer:
             'loss': loss,
         }
         for k, v in reward_counter.items():
-            metrics['reward_{}'.format(k)] = v / self.new_samples_per_epoch
+            metrics['reward_{}'.format(k)] = v / self.seq_per_epoch
 
         # Reduce all the metrics
         metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
@@ -554,11 +658,12 @@ def init_distribution(backend='gloo'):
     logger.info("Distribution initialized.")
 
 
-def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_prefetch_count,
-         exp_dir, job_dir):
-    logger.info('main(rmq_host={}, rmq_port={}, batch_size={} exp_dir={}, job_dir={})'.format(
-        rmq_host, rmq_port, batch_size, exp_dir, job_dir))
- 
+def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
+         pretrained_model, mq_prefetch_count, exp_dir, job_dir):
+    logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
+                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={})'.format(
+        rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count))
+
     # If applicable, initialize distributed training.
     if torch.distributed.is_available():
         init_distribution()
@@ -571,7 +676,10 @@ def main(rmq_host, rmq_port, batch_size, learning_rate, pretrained_model, mq_pre
     dota_optimizer = DotaOptimizer(
         rmq_host=rmq_host,
         rmq_port=rmq_port,
+        epochs=epochs,
+        seq_per_epoch=seq_per_epoch,
         batch_size=batch_size,
+        seq_len=seq_len,
         learning_rate=learning_rate,
         checkpoint=checkpoint,
         pretrained_model=pretrained_model,
@@ -596,18 +704,29 @@ if __name__ == '__main__':
     parser.add_argument("--job-dir", type=str, help="job dir name", default=default_job_dir())
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
-    parser.add_argument("--batch-size", type=int, help="batch size", default=8)
+    parser.add_argument("--epochs", type=int, help="amount of epochs", default=4)
+    parser.add_argument("--seq-per-epoch", type=int, help="amount of sequences per epoch", default=16)
+    parser.add_argument("--batch-size", type=int, help="batch size", default=4)
+    parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
-                        help="amount of experience messages to prefetch from mq", default=2)
+                        help="amount of experience messages to prefetch from mq", default=4)
+    parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
+
     args = parser.parse_args()
+
+    logger.setLevel(args.log_level)
 
     try:
         main(
             rmq_host=args.ip,
             rmq_port=args.port,
+            epochs=args.epochs,
+            seq_per_epoch=args.seq_per_epoch,
             batch_size=args.batch_size,
+            seq_len=args.seq_len,
             learning_rate=args.learning_rate,
             pretrained_model=args.pretrained_model,
             mq_prefetch_count=args.mq_prefetch_count,
