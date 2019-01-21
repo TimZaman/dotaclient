@@ -1,5 +1,11 @@
 # DotaClient on K8s
 
+---
+
+DotaClient is a reinforcement learning system to train RL agents to play Dota 2 through self-play.
+
+<img src="dotaclient.png" alt="dotaclient schema" width="400"/>
+
 * Distributed Agents self-playing Dota 2.
 * Experience/Model Broker (rmq).
 * Distributed Optimizer (PyTorch)
