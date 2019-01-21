@@ -146,7 +146,7 @@ class MessageQueue:
             queue=self.EXPERIENCE_QUEUE_NAME,
             no_ack=False,
         ))
-        # self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
+        self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
         return method, properties, body
 
     def consume_xp(self):
