@@ -206,7 +206,7 @@ class DotaOptimizer:
 
     def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
                  learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir,
-                 entropy_coef):
+                 entropy_coef, run_local):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
@@ -226,6 +226,7 @@ class DotaOptimizer:
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
         self.e_clip = 0.2
+        self.run_local = run_local
 
         self.running_mean = None
         self.running_std = None
@@ -233,8 +234,10 @@ class DotaOptimizer:
         if self.checkpoint:
             self.writer = SummaryWriter(log_dir=self.log_dir)
             logger.info('Checkpointing to: {}'.format(self.log_dir))
-            client = storage.Client()
-            self.bucket = client.get_bucket(self.BUCKET_NAME)
+            # if we are not running locally, set bucket
+            if not self.run_local:
+                client = storage.Client()
+                self.bucket = client.get_bucket(self.BUCKET_NAME)
 
             # First, check if logdir exists.
             latest_model = self.get_latest_model(prefix=self.log_dir)
@@ -246,12 +249,14 @@ class DotaOptimizer:
                     logger.warning('Overriding pretrained model by latest model.')
                 pretrained_model = latest_model
 
-            if pretrained_model is not None:
-                logger.info('Downloading: {}'.format(pretrained_model))
-                model_blob = self.bucket.get_blob(pretrained_model)
-                # TODO(tzaman): Download to BytesIO and supply to torch in that way.
-                pretrained_model = '/tmp/model.pt'
-                model_blob.download_to_filename(pretrained_model)
+            # if we are not running locally, pull down model
+            if not self.run_local:
+                if pretrained_model is not None:
+                    logger.info('Downloading: {}'.format(pretrained_model))
+                    model_blob = self.bucket.get_blob(pretrained_model)
+                    # TODO(tzaman): Download to BytesIO and supply to torch in that way.
+                    pretrained_model = '/tmp/model.pt'
+                    model_blob.download_to_filename(pretrained_model)
 
         if pretrained_model is not None:
             self.policy_base.load_state_dict(torch.load(pretrained_model), strict=False)
@@ -277,7 +282,11 @@ class DotaOptimizer:
         return int(x.group(0))
 
     def get_latest_model(self, prefix):
-        blobs = list(self.bucket.list_blobs(prefix=prefix))
+        if not self.run_local:
+            blobs = list(self.bucket.list_blobs(prefix=prefix))
+        else:
+            blobs = [f for f in os.listdir(prefix) if os.path.isfile(f)]
+
         if not blobs:
             # Directory does not exist, or no files in directory.
             return None
@@ -485,8 +494,9 @@ class DotaOptimizer:
 
                 # Upload events to GCS
                 self.writer.file_writer.flush()  # Flush before uploading
-                blob = self.bucket.blob(self.events_filename)
-                blob.upload_from_filename(filename=self.events_filename)
+                if not self.run_local:
+                    blob = self.bucket.blob(self.events_filename)
+                    blob.upload_from_filename(filename=self.events_filename)
 
                 self.upload_model(version=it)
 
@@ -580,8 +590,9 @@ class DotaOptimizer:
         self.mq.publish_model(msg=state_dict_b, hdr={'version': version})
 
         # Upload to GCP.
-        blob = self.bucket.blob(rel_path)
-        blob.upload_from_string(data=state_dict_b)  # Model
+        if not self.run_local:
+            blob = self.bucket.blob(rel_path)
+            blob.upload_from_string(data=state_dict_b)  # Model
 
 
 def init_distribution(backend='gloo'):
@@ -596,7 +607,7 @@ def init_distribution(backend='gloo'):
 
 
 def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
-         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef):
+         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef, run_local):
     logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
                 ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={})'.format(
         rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
@@ -625,6 +636,7 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         exp_dir=exp_dir,
         job_dir=job_dir,
         entropy_coef=entropy_coef,
+        run_local=run_local,
     )
 
     # Upload initial model.
@@ -654,6 +666,7 @@ if __name__ == '__main__':
                         help="amount of experience messages to prefetch from mq", default=4)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
+    parser.add_argument("--run-local", type=bool, help="set to true to run locally (not using GCP)", default=False)
 
     args = parser.parse_args()
 
@@ -673,6 +686,7 @@ if __name__ == '__main__':
             exp_dir=args.exp_dir,
             job_dir=args.job_dir,
             entropy_coef=args.entropy_coef,
+            run_local=args.run_local,
         )
     except KeyboardInterrupt:
         pass
