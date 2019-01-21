@@ -33,6 +33,8 @@ torch.manual_seed(7)
 
 eps = np.finfo(np.float32).eps.item()
 
+REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']  # HACK! use from agent!
+
 
 def is_distributed():
     return torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -177,7 +179,7 @@ class Sequence:
         # Repeat the rewards where a step has multiple actions, the reward gets repeated.
         self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
 
-    def get_old_probs(self, policy):
+    def calculate_old_probs(self, policy):
         head_prob_dict, _ = policy.sequence(**self.states, hidden=None)
         flat_probs = policy.flatten_action_dict(head_prob_dict)
         vec_probs_all = flat_probs.view(-1)
@@ -303,7 +305,14 @@ class DotaOptimizer:
         # TODO(tzaman): make a rollout object
         method, properties, body = self.mq.consume_xp()
         data = pickle.loads(body)
-        return data, np.sum(data['rewards'])
+        reward_sum = np.sum(data['rewards'])
+        rollout_len = data['actions'].size(0)
+        version = data['weight_version']
+
+        # Compute rewards per topic, reduce-sum down the sequences.
+        subrewards = data['rewards'].sum(axis=0)
+
+        return data, subrewards, rollout_len, version
 
     def experiences_from_rollout(self, data):
         # TODO(tzaman): The rollout can consist out of multiple viable sequences.
@@ -359,14 +368,9 @@ class DotaOptimizer:
             )
 
             # Finally, get the probabilties with the current policy.
-            sequence.get_old_probs(policy=self.policy_old)
-
+            sequence.calculate_old_probs(policy=self.policy_old)
             sequences.append(sequence)
-
         return sequences
-        
-
-
 
     def run(self):
         assert self.seq_per_epoch >= self.batch_size
@@ -377,19 +381,24 @@ class DotaOptimizer:
 
             # First grab a bunch of experiences
             experiences = []
-            rewards = []
+            subrewards = []
+            rollout_lens = []
+            weight_ages = []
             while len(experiences) < self.seq_per_epoch:  # TODO(tzaman): with this approach, we often grab too many sequences!
                 # logger.debug(' adding experience @{}/{}'.format(len(experiences), self.seq_per_epoch))
 
                 # Get new experiences from a new rollout.
-                rollout, reward_sum = self.get_rollout()
+                rollout, rollout_subrewards, rollout_len, weight_version = self.get_rollout()
                 rollout_experiences = self.experiences_from_rollout(data=rollout)
 
                 experiences.extend(rollout_experiences)
 
-                rewards.append(reward_sum)
+                subrewards.append(rollout_subrewards)
+                rollout_lens.append(rollout_len)
+                weight_ages.append(it - weight_version)
 
             losses = []
+            entropies = []
             for ep in range(self.epochs):
                 logger.info(' epoch {}/{}'.format(ep + 1, self.epochs))
                 self.mq.process_data_events()
@@ -400,49 +409,68 @@ class DotaOptimizer:
                 # Divide into batches
                 batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
                 for batch in batches:
-                    losses.append(self.train(experiences=batch))
+                    loss, entropy = self.train(experiences=batch)
+                    losses.append(loss)
+                    entropies.append(entropy)
             
             # Set the new policy as the old one.
             self.policy_old.load_state_dict(self.policy.state_dict())
 
             losses = torch.stack(losses)
             loss = losses.mean()
+            entropies = torch.stack(entropies)
+            entropy = entropies.mean()
 
             n_steps = len(experiences) * self.seq_len
             steps_per_s = n_steps / (time.time() - self.time_last_step)
             self.time_last_step = time.time()
 
-            avg_weight_age = 0.  # TODO
-            reward_per_step = sum(rewards) / n_steps  # TODO
+            subrewards_per_sec = np.stack(subrewards) / n_steps * Policy.OBSERVATIONS_PER_SECOND
+            rollout_rewards = subrewards_per_sec.sum(axis=1)
+            reward_dict = dict(zip(REWARD_KEYS, subrewards_per_sec.sum(axis=0)))
+            reward_per_sec = rollout_rewards.sum()
+
+            rollout_lens = torch.tensor(rollout_lens, dtype=torch.float32)
+            avg_rollout_len = rollout_lens.mean()
+
+            weight_ages = torch.tensor(weight_ages, dtype=torch.float32)
+            avg_weight_age = weight_ages.mean()
 
             metrics = {
                 self.SPEED_KEY: steps_per_s,
-                'reward_per_step': reward_per_step,
+                'reward_per_sec/sum': reward_per_sec,
                 'loss': loss,
+                'entropy': entropy,
+                'avg_rollout_len': avg_rollout_len,
+                'avg_weight_age': avg_weight_age,
             }
 
-            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, reward_per_step={:.4f}, loss={:.4f}'.format(
-                steps_per_s, avg_weight_age, reward_per_step, float(loss)))
+            for k, v in reward_dict.items():
+                metrics['reward_per_sec/{}'.format(k)] = v
+
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.1f}, reward_per_sec={:.4f}, loss={:.4f}, entropy={:.3f}'.format(
+                steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy)))
 
             if self.checkpoint:
+                # TODO(tzaman): re-introduce distributed metrics. See commits from december 2017.
+
                 # Write metrics to events file.
                 for name, metric in metrics.items():
                     self.writer.add_scalar(name, metric, it)
                 
-                # Loss histogram
+                # Add per-iteration histograms
                 self.writer.add_histogram('losses', losses, it)
-
-                # Age histogram
-                # self.writer.add_histogram('weight_age', weight_ages, it)
+                self.writer.add_histogram('entropies', entropies, it)
+                self.writer.add_histogram('rollout_lens', rollout_lens, it)
+                self.writer.add_histogram('weight_age', weight_ages, it)
 
                 # Rewards histogram
-                # self.writer.add_histogram('rewards_radiant', reward_sums[teams==TEAM_RADIANT], it)
-                # self.writer.add_histogram('rewards_dire', reward_sums[teams==TEAM_DIRE], it)
+                self.writer.add_histogram('rewards_per_sec_per_rollout', rollout_rewards, it)
 
                 # Model
-                if it % self.MODEL_HISTOGRAM_FREQ == 1:
+                if it % self.MODEL_HISTOGRAM_FREQ == 0:
                     for name, param in self.policy_base.named_parameters():
-                        self.writer.add_histogram(name, param.clone().cpu().data.numpy(), it)
+                        self.writer.add_histogram('param/' + name, param.clone().cpu().data.numpy(), it)
 
                 # RMQ Queue size.
                 queue_size = self.mq.xp_queue_size
@@ -510,167 +538,14 @@ class DotaOptimizer:
         surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards
         loss = -torch.min(surr1, surr2).mean()
 
+        # Entropy. Notice this is only the entropy of the selected action!
+        entropy = -(vec_probs * torch.log(vec_probs)).mean()
+
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
-        return loss
-
-
-
-
-    def _unused(self, it):
-
-        # Metrics
-        reward_counter = Counter()
-        teams = []
-        weight_ages = []
-        reward_sums = []
-        losses = []
-
-        # Add some experiences to the
-        # experiences = []
-        # for s in range(self.seq_per_epoch):
-        #     logger.debug(' adding experience {}/{}'.format(s + 1, self.seq_per_epoch))
-        #     method, properties, body = self.mq.consume_xp()
-        #     data = pickle.loads(body)
-        #     experience = self.data_to_experience(data)
-
-        #     # Metrics
-        #     experience.update_reward_counter(c=reward_counter)
-        #     reward_sums.append(experience.total_reward)
-        #     teams.append(experience.team_id)
-        #     weight_ages.append(it - experience.weight_version)
-
-        #     # Add to dequeue.
-        #     experiences.append(experience)  
-            
-        # Set the original policy (that we're not updating)
-        self.policy_old.load_state_dict(self.policy.state_dict())
-
-        # Go over each epoch
-        n_steps = 0
-        n_batches = 0
-        for e in range(self.epochs):
-            self.policy.zero_grad()
-            self.mq.process_data_events()
-            logger.debug(' epoch {}/{}'.format(e + 1, self.epochs))
-            # TODO: Shuffle this epoch
-            indices = list(range(len(experiences)))
-            random.shuffle(indices)
-            steps_per_epoch =  len(experiences) // self.batch_size
-            n_batches += steps_per_epoch
-            for b in range(steps_per_epoch):
-                logger.debug('  batch {}/{}'.format(b + 1, steps_per_epoch))
-                start_index = b * self.batch_size
-                batch = [experiences[i] for i in indices[start_index:start_index + self.batch_size]]
-                n_steps += sum([e.steps for e in batch])
-
-                # Normalize rewards
-                rewards = [experience.mh_rewards for experience in batch]
-                rewards = torch.cat(rewards)
-                rewards = self.normalize(t=rewards)
-
-                # Get original probabilities
-                probs_old = torch.cat([experience.probs(policy=self.policy_old) for experience in batch])
-                probs_old.detach()
-
-                # Get new probabilities
-                probs = torch.cat([experience.probs(policy=self.policy) for experience in batch])
-
-                # Probability ratio
-                rt = probs / (probs_old + eps)
-
-                # PPO Objective
-                surr1 = rt * rewards
-                surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * rewards
-                loss = -torch.min(surr1, surr2).mean()
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
-                self.optimizer.step()
-
-                losses.append(loss)
-
-        # Metrics
-
-        steps_per_s = n_steps / (time.time() - self.time_last_step)
-        self.time_last_step = time.time()
-
-        avg_weight_age = sum(weight_ages) / len(weight_ages)
-
-        reward_counter = dict(reward_counter)
-
-        reward_sum = sum(reward_counter.values())
-        mean_reward = reward_sum / self.seq_per_epoch
-
-        losses = torch.stack(losses)
-        loss = losses.mean()
-        logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}, loss={:.4f}'.format(
-            steps_per_s, avg_weight_age, mean_reward, float(loss)))
-
-        speed_key = 'steps per s'
-        metrics = {
-            'steps/batch': n_steps / n_batches,
-            speed_key: steps_per_s,
-            'mean_reward': mean_reward,
-            'loss': loss,
-        }
-        for k, v in reward_counter.items():
-            metrics['reward_{}'.format(k)] = v / self.seq_per_epoch
-
-        # Reduce all the metrics
-        metrics_t = torch.tensor(list(metrics.values()), dtype=torch.float32)
-
-        weight_ages = torch.tensor(weight_ages)
-        teams = torch.tensor(teams)
-        reward_sums = torch.tensor(reward_sums)
-        if is_distributed():
-            dist.all_reduce(metrics_t, op=dist.ReduceOp.SUM)
-            metrics_t /= dist.get_world_size()
-
-            weight_ages = all_gather(weight_ages)
-            teams = all_gather(teams)
-            reward_sums = all_gather(reward_sums)
-
-        metrics_d = dict(zip(metrics.keys(), metrics_t))
-
-        if is_distributed():
-            # Speed is always the sum.
-            metrics_d[speed_key] *= dist.get_world_size()
-
-        if self.checkpoint:
-            # Write metrics to events file.
-            for name, metric in metrics_d.items():
-                self.writer.add_scalar(name, metric, it)
-            
-            # Loss histogram
-            self.writer.add_histogram('losses', losses, it)
-
-            # Age histogram
-            self.writer.add_histogram('weight_age', weight_ages, it)
-
-            # Rewards histogram
-            self.writer.add_histogram('rewards_radiant', reward_sums[teams==TEAM_RADIANT], it)
-            self.writer.add_histogram('rewards_dire', reward_sums[teams==TEAM_DIRE], it)
-
-            # Model
-            if it % self.MODEL_HISTOGRAM_FREQ == 1:
-                for name, param in self.policy_base.named_parameters():
-                    self.writer.add_histogram(name, param.clone().cpu().data.numpy(), it)
-
-            # RMQ Queue size.
-            queue_size = self.mq.xp_queue_size
-            if queue_size is not None:
-                self.writer.add_scalar('mq_size', queue_size, it)
-
-            # Upload events to GCS
-            self.writer.file_writer.flush()  # Flush before uploading
-            blob = self.bucket.blob(self.events_filename)
-            blob.upload_from_filename(filename=self.events_filename)
-
-            self.upload_model(version=it)
+        return loss, entropy
 
 
     def upload_model(self, version):
@@ -702,7 +577,9 @@ class DotaOptimizer:
 def init_distribution(backend='gloo'):
     logger.info('init_distribution')
     assert 'WORLD_SIZE' in os.environ
-    if int(os.environ['WORLD_SIZE']) < 2:
+    world_size = int(os.environ['WORLD_SIZE'])
+    if world_size < 2:
+        logger.warning('skipping distribution: world size too small ({})'.format(world_size))
         return
     torch.distributed.init_process_group(backend=backend)
     logger.info("Distribution initialized.")

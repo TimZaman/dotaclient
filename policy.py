@@ -26,6 +26,7 @@ class Policy(nn.Module):
     N_MOVE_ENUMS = 9
     MOVE_ENUMS = np.arange(N_MOVE_ENUMS, dtype=np.float32) - int(N_MOVE_ENUMS / 2)
     MOVE_ENUMS *= MAX_MOVE_IN_OBS / (N_MOVE_ENUMS - 1) * 2
+    OBSERVATIONS_PER_SECOND = TICKS_PER_SECOND / TICKS_PER_OBSERVATION
 
     def __init__(self):
         super().__init__()
