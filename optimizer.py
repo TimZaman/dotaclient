@@ -29,8 +29,6 @@ logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-np.set_printoptions(threshold=np.nan)
-torch.set_printoptions(profile="full")
 torch.manual_seed(7)
 
 eps = np.finfo(np.float32).eps.item()
@@ -321,7 +319,9 @@ class DotaOptimizer:
         pad = rollout_len % self.seq_len
         pad = 0 if pad == 0 else self.seq_len - pad
         n_sequences = rollout_len // self.seq_len if pad == 0 else rollout_len // self.seq_len + 1
-        logger.info('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
+
+        logger.debug('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
+
         if pad != 0:
             dim_pad = {
                 1: (0, pad),
@@ -349,7 +349,7 @@ class DotaOptimizer:
             for key in sliced_states:
                 sliced_states[key] = states[key][start:end, :].detach()
 
-            sequence =  Sequence(
+            sequence = Sequence(
                 game_id=data['game_id'],
                 states=sliced_states,
                 actions=actions[start:end, :].detach(),
@@ -410,7 +410,6 @@ class DotaOptimizer:
             loss = losses.mean()
 
             n_steps = len(experiences) * self.seq_len
-            print('n_steps=', n_steps)
             steps_per_s = n_steps / (time.time() - self.time_last_step)
             self.time_last_step = time.time()
 
@@ -423,7 +422,7 @@ class DotaOptimizer:
                 'loss': loss,
             }
 
-            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, reward_per_step={:.2f}, loss={:.4f}'.format(
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, reward_per_step={:.4f}, loss={:.4f}'.format(
                 steps_per_s, avg_weight_age, reward_per_step, float(loss)))
 
             if self.checkpoint:
@@ -479,6 +478,8 @@ class DotaOptimizer:
                 states[key].append(e.states[key])
         states = {key: torch.stack(states[key]) for key in states}
 
+        # Notice there is no notion of loss masking here, this is unnessecary as we only work
+        # use selected probabilties. E.g. when things were padded, nothing was selected, so no data.
 
         head_prob_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
         flat_probs = self.policy.flatten_action_dict(head_prob_dict)
