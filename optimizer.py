@@ -49,10 +49,6 @@ def discount(x, gamma):
     return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1].astype(np.float32)
 
 
-def normalize(x):
-    return (x - x.mean()) / (x.std() + eps)
-
-
 class MessageQueue:
     EXPERIENCE_QUEUE_NAME = 'experience'
     MODEL_EXCHANGE_NAME = 'model'
@@ -225,6 +221,9 @@ class DotaOptimizer:
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
         self.e_clip = 0.2
+
+        self.running_mean = None
+        self.running_std = None
 
         if self.checkpoint:
             self.writer = SummaryWriter(log_dir=self.log_dir)
@@ -457,6 +456,21 @@ class DotaOptimizer:
 
                 self.upload_model(version=it)
 
+    def normalize(self, x):
+        # TODO(tzaman): The running means and std's should be computed at the rollout phase,
+        # because (1) speed and (2) we are looping over this normalization an 'epoch' a mount of
+        # times.
+        mean_reward = x.mean()
+        mean_std = x.std()
+        if self.running_mean is None:  #  First step
+            self.running_mean = mean_reward
+            self.running_std = mean_std
+        else:
+            self.running_mean = self.running_mean * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
+            self.running_std = self.running_std * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+
+        return (x - self.running_mean) / (self.running_std + eps)
+
     def train(self, experiences):
         # Train on one epoch of data.
         # Experiences is a list of (padded) experience chunks.
@@ -470,7 +484,7 @@ class DotaOptimizer:
         # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
         # pre-calculated mean and eps scalars to normalize by, since we will be going over this
         # each piece of experience an 'episode' amount of times.
-        vec_mh_rewards = normalize(vec_mh_rewards)
+        vec_mh_rewards = self.normalize(vec_mh_rewards)
 
         states = {key: [] for key in Policy.INPUT_KEYS}
         for e in experiences:
