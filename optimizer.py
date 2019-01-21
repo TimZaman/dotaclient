@@ -25,11 +25,12 @@ from distributed import DistributedDataParallelSparseParamCPU
 from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
 from policy import Policy
 
-
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+np.set_printoptions(threshold=np.nan)
+torch.set_printoptions(profile="full")
 torch.manual_seed(7)
 
 eps = np.finfo(np.float32).eps.item()
@@ -68,7 +69,7 @@ class MessageQueue:
         self._params = pika.ConnectionParameters(
             host=host,
             port=port,
-            heartbeat=0,
+            heartbeat=300,
         )
         self.prefetch_count = prefetch_count
         self.use_model_exchange = use_model_exchange
@@ -147,7 +148,7 @@ class MessageQueue:
             queue=self.EXPERIENCE_QUEUE_NAME,
             no_ack=False,
         ))
-        self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
+        # self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
         return method, properties, body
 
     def consume_xp(self):
@@ -163,34 +164,22 @@ class MessageQueue:
             logger.info('closing queue connection')
             self._conn.close()
 
-class Experience:
-    def __init__(self, game_id, states, actions, rewards, weight_version, team_id, seq_len):
+class Sequence:
+    def __init__(self, game_id, states, actions, rewards, advantages, weight_version, team_id):
         self.game_id = game_id
         self.weight_version = weight_version
         self.team_id = team_id
-        self.seq_len = seq_len
-
-        # TODO(tzaman): Like here, we need to calculate advantage before any padding or slicing.
-        reward_sum = np.sum(rewards, axis=1)
-        advantage = discount(x=reward_sum, gamma=0.98)
-
-        # HACK: Slice to a standard length
-        self.rewards = rewards[:self.seq_len, :]
-        self.advantage = advantage[:self.seq_len]
-        self.actions = actions[:self.seq_len, :]
-        self.states = {key: None for key in Policy.INPUT_KEYS}
-        for key in self.states:
-            self.states[key] = states[key][:self.seq_len, :]
-
-        # Calculate stuff
-        self.total_reward = np.sum(self.rewards)
+        self.states = states
+        self.actions = actions
+        self.rewards = rewards
+        self.advantages = advantages
 
         # Create a vector with the n-hot mask of actions.
         self.vec_action_mask = self.actions.view(-1)
 
         # Count the amount of (multi-head) actions taken for each step.
         action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
-        vec_rewards = np.ravel(self.advantage)  # flat view
+        vec_rewards = np.ravel(self.advantages)  # flat view
         # Repeat the rewards where a step has multiple actions, the reward gets repeated.
         self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
 
@@ -313,16 +302,72 @@ class DotaOptimizer:
         self.optimizer.step()
         return loss
 
-    def data_to_experience(self, data):
-        return Experience(
-            game_id=data['game_id'],
-            states=data['states'],
-            actions=data['actions'],
-            rewards=data['rewards'],
-            weight_version=data['weight_version'],
-            team_id=data['team_id'],
-            seq_len = self.seq_len
+    def get_rollout(self):
+        # TODO(tzaman): make a rollout object
+        method, properties, body = self.mq.consume_xp()
+        data = pickle.loads(body)
+        return data, np.sum(data['rewards'])
+
+    def experiences_from_rollout(self, data):
+        # TODO(tzaman): The rollout can consist out of multiple viable sequences.
+        # These should be padded and then sliced into separate experiences.
+
+        actions = data['actions']
+        rewards = data['rewards']
+        states = data['states']
+
+        # If applicable, pad the rollout so we can cut into distinct sequences.
+        rollout_len = data['actions'].size(0)
+        pad = rollout_len % self.seq_len
+        pad = 0 if pad == 0 else self.seq_len - pad
+        n_sequences = rollout_len // self.seq_len if pad == 0 else rollout_len // self.seq_len + 1
+        logger.info('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
+        if pad != 0:
+            dim_pad = {
+                1: (0, pad),
+                2: (0, 0, 0, pad),
+                3: (0, 0, 0, 0, 0, pad),
+            }
+            actions = torch.nn.functional.pad(actions, pad=dim_pad[actions.dim()], mode='constant', value=0)
+            rewards = np.pad(rewards, ((0, pad), (0, 0)), mode='constant')
+
+            for key in states:
+                states[key] = torch.nn.functional.pad(states[key], dim_pad[states[key].dim()], mode='constant', value=0)
+
+        # The advantage needs to be calculated here, in order to get information from the full
+        # rollout.
+        advantages = discount(x=np.sum(rewards, axis=1), gamma=0.98)
+
+        # Slice the rollout into distinct sequences.
+        sequences = []
+        for s in range(n_sequences):
+            start = s * self.seq_len
+            end = start + self.seq_len
+            logger.debug('Slicing sequence {} from [{}:{}]'.format(s, start, end))
+
+            sliced_states = {key: None for key in Policy.INPUT_KEYS}
+            for key in sliced_states:
+                sliced_states[key] = states[key][start:end, :].detach()
+
+            sequence =  Sequence(
+                game_id=data['game_id'],
+                states=sliced_states,
+                actions=actions[start:end, :].detach(),
+                rewards=rewards[start:end, :],
+                advantages=advantages[start:end],
+                weight_version=data['weight_version'],
+                team_id=data['team_id'],
             )
+
+            # Finally, get the probabilties with the current policy.
+            sequence.get_old_probs(policy=self.policy_old)
+
+            sequences.append(sequence)
+
+        return sequences
+        
+
+
 
     def run(self):
         assert self.seq_per_epoch >= self.batch_size
@@ -334,31 +379,20 @@ class DotaOptimizer:
             # First grab a bunch of experiences
             experiences = []
             rewards = []
-            for s in range(self.seq_per_epoch):
-                logger.debug(' adding experience {}/{}'.format(s + 1, self.seq_per_epoch))
+            while len(experiences) < self.seq_per_epoch:  # TODO(tzaman): with this approach, we often grab too many sequences!
+                # logger.debug(' adding experience @{}/{}'.format(len(experiences), self.seq_per_epoch))
 
-                # Grab a rollout
-                while True:
-                    method, properties, body = self.mq.consume_xp()
-                    data = pickle.loads(body)
-                    l = data['actions'].size(0)
-                    if  l >= self.seq_len:
-                        break
-                    else:
-                        logger.warning('Skipping short sequence (length={})'.format(l))
+                # Get new experiences from a new rollout.
+                rollout, reward_sum = self.get_rollout()
+                rollout_experiences = self.experiences_from_rollout(data=rollout)
 
-                # TODO(tzaman): The rollout can consist out of multiple viable sequences.
-                # These should be padded and then sliced into separate experiences.
-                experience = self.data_to_experience(data)
-                experience.get_old_probs(policy=self.policy_old)
-                rewards.append(experience.total_reward)
-                experiences.append(experience)
+                experiences.extend(rollout_experiences)
 
-            assert len(experiences) % self.batch_size == 0
+                rewards.append(reward_sum)
 
             losses = []
             for ep in range(self.epochs):
-                logger.debug(' epoch {}/{}'.format(ep + 1, self.epochs))
+                logger.info(' epoch {}/{}'.format(ep + 1, self.epochs))
                 self.mq.process_data_events()
 
                 # Shuffle the list of experience chunks.
@@ -375,21 +409,22 @@ class DotaOptimizer:
             losses = torch.stack(losses)
             loss = losses.mean()
 
-            n_steps = self.seq_per_epoch * self.seq_len
+            n_steps = len(experiences) * self.seq_len
+            print('n_steps=', n_steps)
             steps_per_s = n_steps / (time.time() - self.time_last_step)
             self.time_last_step = time.time()
 
             avg_weight_age = 0.  # TODO
-            mean_reward = sum(rewards) / len(rewards)  # TODO
+            reward_per_step = sum(rewards) / n_steps  # TODO
 
             metrics = {
                 self.SPEED_KEY: steps_per_s,
-                'mean_reward': mean_reward,
+                'reward_per_step': reward_per_step,
                 'loss': loss,
             }
 
-            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, mean_reward={:.2f}, loss={:.4f}'.format(
-                steps_per_s, avg_weight_age, mean_reward, float(loss)))
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.2f}, reward_per_step={:.2f}, loss={:.4f}'.format(
+                steps_per_s, avg_weight_age, reward_per_step, float(loss)))
 
             if self.checkpoint:
                 # Write metrics to events file.
