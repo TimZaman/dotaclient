@@ -461,10 +461,11 @@ class Player:
 
         logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
 
-        action_dict = self.policy.select_actions(head_prob_dict=head_prob_dict)
+        head_prob_dict = self.policy.mask_heads(head_prob_dict, unit_handles)
 
-        # print('flatten_selections=', self.policy.flatten_selections(action_dict))
-        # print('flatten_action_dict=', self.policy.flatten_action_dict(head_prob_dict))
+        logger.debug('head_prob_dict (masked) :\n' + pformat(head_prob_dict))
+
+        action_dict = self.policy.select_actions(head_prob_dict=head_prob_dict)
 
         return action_dict, policy_input, unit_handles, hidden
 

@@ -127,6 +127,9 @@ class Policy(nn.Module):
 
         action_target_unit = action_target_unit.squeeze(2)  # (b, s, 1, units) -> (b, s, units)
 
+        # Action space noise?
+        # action_scores_enum += (torch.randn(action_scores_enum.shape) * 1)
+
         action_dict = dict(
             enum=F.softmax(action_scores_enum, dim=2),  # (b, s, 3)
             x=F.softmax(action_scores_x, dim=2),  # (b, s, 9)
@@ -180,6 +183,18 @@ class Policy(nn.Module):
             ValueError("Invalid Action Selection.")
 
         return action_dict
+
+    @staticmethod
+    def mask_heads(head_prob_dict, unit_handles):
+        """Mask the head with possible actions."""
+        # Mark your own unit as invalid
+        invalid_units = unit_handles == -1
+        invalid_units[0] = 1 # The 'self' hero can never be targetted.
+        if invalid_units.all():
+            # All units invalid, so we cannot choose the high-level attack head:
+            head_prob_dict['enum'][0, 0, 2] = 0.
+        head_prob_dict['target_unit'][0, 0, invalid_units] = 0.
+        return head_prob_dict
 
     @classmethod
     def action_probs(cls, head_prob_dict, action_dict):
