@@ -308,11 +308,12 @@ class DotaOptimizer:
         reward_sum = np.sum(data['rewards'])
         rollout_len = data['actions'].size(0)
         version = data['weight_version']
+        canvas = data['canvas']
 
         # Compute rewards per topic, reduce-sum down the sequences.
         subrewards = data['rewards'].sum(axis=0)
 
-        return data, subrewards, rollout_len, version
+        return data, subrewards, rollout_len, version, canvas
 
     def experiences_from_rollout(self, data):
         # TODO(tzaman): The rollout can consist out of multiple viable sequences.
@@ -384,11 +385,12 @@ class DotaOptimizer:
             subrewards = []
             rollout_lens = []
             weight_ages = []
+            canvas = None  # Just save only the last canvas.
             while len(experiences) < self.seq_per_epoch:  # TODO(tzaman): with this approach, we often grab too many sequences!
                 # logger.debug(' adding experience @{}/{}'.format(len(experiences), self.seq_per_epoch))
 
                 # Get new experiences from a new rollout.
-                rollout, rollout_subrewards, rollout_len, weight_version = self.get_rollout()
+                rollout, rollout_subrewards, rollout_len, weight_version, canvas = self.get_rollout()
                 rollout_experiences = self.experiences_from_rollout(data=rollout)
 
                 experiences.extend(rollout_experiences)
@@ -471,6 +473,7 @@ class DotaOptimizer:
                 if it % self.MODEL_HISTOGRAM_FREQ == 0:
                     for name, param in self.policy_base.named_parameters():
                         self.writer.add_histogram('param/' + name, param.clone().cpu().data.numpy(), it)
+                        self.writer.add_image('canvas', canvas, it, dataformats='HWC')
 
                 # RMQ Queue size.
                 queue_size = self.mq.xp_queue_size

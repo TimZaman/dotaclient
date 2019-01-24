@@ -1,5 +1,6 @@
-from collections import deque
 from collections import Counter
+from collections import deque
+from datetime import datetime
 from pprint import pprint, pformat
 import argparse
 import asyncio
@@ -8,10 +9,10 @@ import logging
 import math
 import os
 import pickle
+import random
 import time
 import traceback
 import uuid
-import random
 
 from dotaservice.protos.dota_gcmessages_common_bot_script_pb2 import CMsgBotWorldState
 from dotaservice.protos.dota_shared_enums_pb2 import DOTA_GAMEMODE_1V1MID
@@ -27,6 +28,7 @@ from grpclib.client import Channel
 import aioamqp
 import grpc
 import numpy as np
+import png
 import torch
 
 import pika # TODO(tzaman): remove in favour of aioamqp
@@ -44,7 +46,7 @@ OPPOSITE_TEAM = {TEAM_DIRE: TEAM_RADIANT, TEAM_RADIANT: TEAM_DIRE}
 TICKS_PER_OBSERVATION = 15
 N_DELAY_ENUMS = 5
 HOST_TIMESCALE = 10
-N_EPISODES = 10000000
+N_GAMES = 10000000
 MAX_AGE_WEIGHTSTORE = 32
 
 HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
@@ -235,7 +237,7 @@ class Player:
         Status.Value('DIRE_WIN'): TEAM_DIRE,
     }
 
-    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_model):
+    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_model, drawing):
         self.game_id = game_id
         self.player_id = player_id
         self.team_id = team_id
@@ -246,6 +248,9 @@ class Player:
         self.actions = []
         self.rewards = []
         self.hidden = None
+        self.drawing = drawing
+
+        self.creeps_had_spawned = False
 
         if use_latest_model:
             version, state_dict = weight_store.latest_model()
@@ -321,6 +326,7 @@ class Player:
             'actions': torch.stack(self.actions),  # stack or cat?
             'rewards': packed_rewards,
             'weight_version': self.policy.weight_version,
+            'canvas': self.drawing.canvas,
         })
         self.experience_channel.basic_publish(
             exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data)
@@ -436,6 +442,13 @@ class Player:
 
         unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles])
 
+        if not self.creeps_had_spawned and world_state.dota_time > 0.:
+            # Check that creeps have spawned. See dotaclient/issues/15.
+            # TODO(tzaman): should this be handled by DotaService?
+            self.creeps_had_spawned = bool((allied_nonhero_handles != -1).any())
+            if not self.creeps_had_spawned:
+                raise ValueError('Creeps have not spawned at timestep {}'.format(world_state.dota_time))
+
         policy_input = dict(
             env=env_state,
             allied_heroes=allied_heroes,
@@ -504,14 +517,41 @@ class Player:
         return action_pb
 
     def compute_reward(self, prev_obs, obs):
+        # Draw.
+        self.drawing.step(state=obs, team_id=self.team_id, player_id=self.player_id)
+
         reward = get_reward(prev_obs=prev_obs, obs=obs, player_id=self.player_id)
         self.rewards.append(reward)
+
+
+class Drawing:
+
+    TEAM_COLORS = {TEAM_DIRE: [255, 0, 0], TEAM_RADIANT: [0, 255, 0]}
+
+    def __init__(self, size=256):
+        # Notice the shape is in (H, W, C)
+        self.size = size
+        self.sizeh = self.size / 2.
+        self.canvas = np.ones((self.size, self.size, 3), dtype=np.uint8) * 255
+        self.ratio = self.sizeh / (8000.)
+
+    def normalize_location(self, l):
+        return int((l.x * self.ratio) + self.sizeh), int(self.size - (l.y * self.ratio) - self.sizeh)
+
+    def step(self, state, team_id, player_id):
+        for unit in state.units:
+            if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO') \
+                and unit.player_id == player_id:
+                x, y = self.normalize_location(l=unit.location)
+                self.canvas[y, x] = self.TEAM_COLORS[team_id]
+
+    def save(self, stem):
+        png.from_array(self.canvas, 'RGB').save('{}.png'.format(stem))
 
 
 class Game:
 
     ENV_RETRY_DELAY = 15
-    EXCEPTION_RETRIES = 10
 
     def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time,
                  latest_model_prob):
@@ -520,10 +560,9 @@ class Game:
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
         self.max_dota_time = max_dota_time
-        self.game_id = 'my_game_id'
         self.latest_model_prob = latest_model_prob
 
-    async def play(self):
+    async def play(self, game_id):
         logger.info('Starting game.')
 
         use_latest_model = {TEAM_RADIANT: True, TEAM_DIRE: True}
@@ -531,25 +570,29 @@ class Game:
             old_model_team = random.choice([TEAM_RADIANT, TEAM_DIRE])
             use_latest_model[old_model_team] = False
 
+        drawing = Drawing()  # TODO(tzaman): drawing should include include what's visible to the player
+
         players = {
             TEAM_RADIANT:
             Player(
-                game_id=self.game_id,
+                game_id=game_id,
                 player_id=0,
                 team_id=TEAM_RADIANT,
                 experience_channel=self.experience_channel,
                 use_latest_model=use_latest_model[TEAM_RADIANT],
+                drawing=drawing,
                 ),
             TEAM_DIRE:
             Player(
-                game_id=self.game_id,
+                game_id=game_id,
                 player_id=5,
                 team_id=TEAM_DIRE,
                 experience_channel=self.experience_channel,
                 use_latest_model=use_latest_model[TEAM_DIRE],
+                drawing=drawing,
                 ),
         }
-
+        
         response = await asyncio.wait_for(self.dota_service.reset(self.config), timeout=120)
 
         prev_obs = {
@@ -561,7 +604,7 @@ class Game:
         dota_time = -float('Inf')
         end_state = None
         while dota_time < self.max_dota_time:
-            for team_id, player in players.items():
+            for team_id, player in players.items():  # TODO(tzaman): actually, should loop over teams first instead of players.
                 logger.debug('dota_time={:.2f}, team={}'.format(dota_time, team_id))
                 player = players[team_id]
 
@@ -602,6 +645,7 @@ class Game:
             for player in players.values():
                 player.process_endstate(end_state)
 
+        # drawing.save(stem=game_id)  # HACK
 
         # Final rollout. Probably partial.
         for player in players.values():
@@ -647,9 +691,14 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_pro
                 rollout_size=rollout_size, max_dota_time=max_dota_time,
                 latest_model_prob=latest_model_prob)
 
-    for episode in range(0, N_EPISODES):
-        logger.info('=== Starting Episode {}.'.format(episode))
-        await game.play()
+    for i in range(0, N_GAMES):
+        logger.info('=== Starting Gane {}.'.format(i))
+        game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
+        try:
+            await game.play(game_id=game_id)
+        except:
+            traceback.print_exc()
+            return
 
     channel_dota.close()
 
@@ -669,6 +718,8 @@ if __name__ == '__main__':
 
     logger.setLevel(args.log_level)
 
-    asyncio.run(main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
-                     max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob,
-                     initial_model=args.model))
+    loop = asyncio.get_event_loop()
+    coro = main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
+                max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob,
+                initial_model=args.model)
+    loop.run_until_complete(coro)
