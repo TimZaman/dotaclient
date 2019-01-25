@@ -33,7 +33,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats = nn.Linear(8, 128)
+        self.affine_unit_basic_stats = nn.Linear(9, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -243,7 +243,7 @@ class RndModel(torch.nn.Module):
 
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes):
         if allied_heroes.size(0) == 0:  # HACK: Dead hero.
-            allied_heroes = torch.zeros(1, 8)
+            allied_heroes = torch.zeros(1, 9)
         inputs = torch.cat([env.view(-1), allied_heroes.view(-1)])
         x = F.relu(self.affine1(inputs))
         x = F.relu(self.affine2(x))
