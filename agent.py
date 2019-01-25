@@ -127,8 +127,8 @@ def get_reward(prev_obs, obs, player_id):
         reward['hp'] = 0
 
     # Kill and death rewards
-    reward['kills'] = (player.kills - player_init.kills) * 1.0
-    reward['death'] = (player.deaths - player_init.deaths) * -0.5
+    reward['kills'] = (player.kills - player_init.kills) * 3.0
+    reward['death'] = (player.deaths - player_init.deaths) * -3.0
 
     # Last-hit reward
     lh = unit.last_hits - unit_init.last_hits
@@ -139,7 +139,7 @@ def get_reward(prev_obs, obs, player_id):
     reward['denies'] = denies * 0.2
 
     # Tower hp reward. Note: towers have 1900 hp.
-    # reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
+    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
 
     # Microreward for distance to help nudge to mid initially.
     dist_mid = math.sqrt(unit.location.x**2 + unit.location.y**2)
