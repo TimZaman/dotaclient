@@ -24,6 +24,7 @@ import torch.distributed as dist
 from distributed import DistributedDataParallelSparseParamCPU
 from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
 from policy import Policy
+from policy import REWARD_KEYS
 
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,8 +33,6 @@ logger.setLevel(logging.INFO)
 torch.manual_seed(7)
 
 eps = np.finfo(np.float32).eps.item()
-
-REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']  # HACK! use from agent!
 
 
 def is_distributed():

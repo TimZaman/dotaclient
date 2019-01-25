@@ -34,13 +34,12 @@ import torch
 import pika # TODO(tzaman): remove in favour of aioamqp
 
 from policy import Policy
-
+from policy import REWARD_KEYS
 
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 
 # Static variables
-REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']
 OPPOSITE_TEAM = {TEAM_DIRE: TEAM_RADIANT, TEAM_RADIANT: TEAM_DIRE}
 
 TICKS_PER_OBSERVATION = 15

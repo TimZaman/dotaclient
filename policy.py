@@ -17,6 +17,7 @@ TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
 
 Action = namedtuple('Action', ['sample', 'probs', 'log_prob'])
+REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']  # HACK! use from agent!
 
 class Policy(nn.Module):
 
