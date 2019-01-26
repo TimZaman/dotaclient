@@ -203,10 +203,10 @@ class DotaOptimizer:
     MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
     SPEED_KEY = 'steps per s'
-    ENTROPY_COEF = 0.05
 
     def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
-                 learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir):
+                 learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir,
+                 entropy_coef):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
@@ -221,6 +221,8 @@ class DotaOptimizer:
         self.policy_base = Policy()
         self.exp_dir = exp_dir
         self.job_dir = job_dir
+        self.entropy_coef = entropy_coef
+
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
         self.e_clip = 0.2
@@ -545,9 +547,9 @@ class DotaOptimizer:
 
         # Entropy. Get the probability of the selected heads only.
         vec_head_probs = torch.masked_select(input=vec_probs_all, mask=vec_head_mask)
-        entropy = -(vec_head_probs * torch.log(vec_head_probs)).mean()
+        entropy = -(vec_head_probs * torch.log(vec_head_probs)).mean()  # Always positive
         
-        loss = policy_loss - entropy * self.ENTROPY_COEF
+        loss = policy_loss - entropy * self.entropy_coef
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -594,10 +596,11 @@ def init_distribution(backend='gloo'):
 
 
 def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
-         pretrained_model, mq_prefetch_count, exp_dir, job_dir):
+         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef):
     logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
-                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={})'.format(
-        rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count))
+                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={})'.format(
+        rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
+        entropy_coef))
 
     # If applicable, initialize distributed training.
     if torch.distributed.is_available():
@@ -621,6 +624,7 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         mq_prefetch_count=mq_prefetch_count,
         exp_dir=exp_dir,
         job_dir=job_dir,
+        entropy_coef=entropy_coef,
     )
 
     # Upload initial model.
@@ -644,6 +648,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch-size", type=int, help="batch size", default=4)
     parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
+    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.05)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
                         help="amount of experience messages to prefetch from mq", default=4)
@@ -667,6 +672,7 @@ if __name__ == '__main__':
             mq_prefetch_count=args.mq_prefetch_count,
             exp_dir=args.exp_dir,
             job_dir=args.job_dir,
+            entropy_coef=args.entropy_coef,
         )
     except KeyboardInterrupt:
         pass
