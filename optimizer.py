@@ -171,6 +171,7 @@ class Sequence:
 
         # Create a vector with the n-hot mask of actions.
         self.vec_action_mask = self.actions.view(-1)
+        self.vec_head_mask = Policy.flat_actions_to_headmask(self.actions).view(-1)
 
         # Count the amount of (multi-head) actions taken for each step.
         action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
@@ -202,6 +203,7 @@ class DotaOptimizer:
     MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
     SPEED_KEY = 'steps per s'
+    ENTROPY_COEF = 0.05
 
     def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
                  learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir):
@@ -509,6 +511,7 @@ class DotaOptimizer:
         # Batch together all experiences.
         vec_mh_rewards = torch.cat([e.vec_mh_rewards for e in experiences])
         vec_action_mask = torch.cat([e.vec_action_mask for e in experiences])
+        vec_head_mask = torch.cat([e.vec_head_mask for e in experiences])
         vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
 
         # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
@@ -530,18 +533,21 @@ class DotaOptimizer:
         vec_probs_all = flat_probs.view(-1)
 
         # Now mask the probs by the selection
-        vec_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
+        vec_selected_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
 
         # Probability ratio
-        rt = vec_probs / (vec_old_probs + eps)
+        rt = vec_selected_probs / (vec_old_probs + eps)
 
         # PPO Objective
         surr1 = rt * vec_mh_rewards
         surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards
-        loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
 
-        # Entropy. Notice this is only the entropy of the selected action!
-        entropy = -(vec_probs * torch.log(vec_probs)).mean()
+        # Entropy. Get the probability of the selected heads only.
+        vec_head_probs = torch.masked_select(input=vec_probs_all, mask=vec_head_mask)
+        entropy = -(vec_head_probs * torch.log(vec_head_probs)).mean()
+        
+        loss = policy_loss - entropy * self.ENTROPY_COEF
 
         self.optimizer.zero_grad()
         loss.backward()

@@ -144,24 +144,47 @@ class Policy(nn.Module):
         """Flattens dicts with probabilities per actions to a dense (probability) tensor"""
         return torch.cat([inputs['enum'], inputs['x'], inputs['y'], inputs['target_unit']], dim=2)
 
-    @staticmethod
-    def flatten_selections(inputs):
+    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16}
+
+    @classmethod
+    def flatten_selections(cls, inputs):
         """Flatten a dict with a (n-multi)action selection(s) into a 'n-hot' 1D tensor"""
-        d = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 38}  # 1+5+16+16=38
-        t = torch.zeros(sum(d.values()), dtype=torch.uint8)
+        t = torch.zeros(sum(cls.ACTION_OUTPUT_COUNTS.values()), dtype=torch.uint8)
         i = 0
-        for key, val in d.items():
+        for key, val in cls.ACTION_OUTPUT_COUNTS.items():
             if key in inputs:
                 t[i + inputs[key]] = 1
             i += val
         return t
+
+    @classmethod
+    def flat_actions_to_headmask(cls, inputs):
+        """Takes in flattened selections, then masks out full heads."""
+        # TODO(tzaman): properly store all these magic numbers
+        enum = inputs[:, :3]
+        enumh = enum.any(dim=1, keepdim=True)
+        enumh = enumh.repeat(1, 3)
+
+        x = inputs[:, 3:3+9]
+        xh = x.any(dim=1, keepdim=True)
+        xh = xh.repeat(1, 9)
+
+        y = inputs[:, 3+9:3+9+9]
+        yh = y.any(dim=1, keepdim=True)
+        yh = yh.repeat(1, 9)
+
+        target_unit = inputs[:, 3+9+9:]
+        target_unith = target_unit.any(dim=1, keepdim=True)
+        target_unith = target_unith.repeat(1, 38)  # 1+5+16+16
+
+        # Put it back together
+        return torch.cat([enumh, xh, yh, target_unith], dim=1)
 
     @staticmethod
     def sample_action(probs, espilon=0.15):
         if torch.rand(1) < espilon:
             # return torch.randint(probs.size(2), [1, 1])
             probs = (probs > 0).reshape(1, 1, -1).float()
-            print('probs=', probs)
             probs += 1e-7  # Add eps to avoid pytorch negative issue.
             return Categorical(probs).sample()
         else:
