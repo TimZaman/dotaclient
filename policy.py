@@ -16,7 +16,6 @@ logger.setLevel(logging.INFO)
 TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
 
-Action = namedtuple('Action', ['sample', 'probs', 'log_prob'])
 REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']  # HACK! use from agent!
 
 class Policy(nn.Module):
@@ -158,8 +157,19 @@ class Policy(nn.Module):
         return t
 
     @staticmethod
-    def sample_action(probs):
-        return Categorical(probs).sample()
+    def sample_action(probs, espilon=0.15):
+        if torch.rand(1) < espilon:
+            # return torch.randint(probs.size(2), [1, 1])
+            probs = (probs > 0).reshape(1, 1, -1).float()
+            print('probs=', probs)
+            probs += 1e-7  # Add eps to avoid pytorch negative issue.
+            return Categorical(probs).sample()
+        else:
+            # Greedy
+            return torch.argmax(probs, dim=2)
+        
+        # # Stochastic
+        # return Categorical(probs).sample()
 
     @staticmethod
     def action_log_prob(probs, sample):
@@ -196,19 +206,6 @@ class Policy(nn.Module):
             head_prob_dict['enum'][0, 0, 2] = 0.
         head_prob_dict['target_unit'][0, 0, invalid_units] = 0.
         return head_prob_dict
-
-    @classmethod
-    def action_probs(cls, head_prob_dict, action_dict):
-        # Given heads (probabilities) and actions distinctly selected from those, join these
-        # pieces of information to yield: (1) the action (2) the prob (3) the logprob
-        action_probs = {}
-        for k, v in action_dict.items():
-            action_probs[k] = Action(
-                sample=v,
-                probs=head_prob_dict[k],
-                log_prob=cls.action_log_prob(probs=head_prob_dict[k], sample=v),
-                )
-        return action_probs
 
 
 class RndModel(torch.nn.Module):

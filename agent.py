@@ -478,13 +478,13 @@ class Player:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value('DOTA_UNIT_ORDER_NONE')
         elif action_enum == 1:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value(
-                'DOTA_UNIT_ORDER_MOVE_TO_POSITION')
+                'DOTA_UNIT_ORDER_MOVE_DIRECTLY')
             m = CMsgBotWorldState.Action.MoveToLocation()
             hero_location = hero_unit.location
             m.location.x = hero_location.x + Policy.MOVE_ENUMS[action_dict['x']]
             m.location.y = hero_location.y + Policy.MOVE_ENUMS[action_dict['y']]
             m.location.z = 0
-            action_pb.moveToLocation.CopyFrom(m)
+            action_pb.moveDirectly.CopyFrom(m)
         elif action_enum == 2:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value(
                 'DOTA_UNIT_ORDER_ATTACK_TARGET')
@@ -691,7 +691,7 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_pro
                 latest_model_prob=latest_model_prob)
 
     for i in range(0, N_GAMES):
-        logger.info('=== Starting Gane {}.'.format(i))
+        logger.info('=== Starting Game {}.'.format(i))
         game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
         try:
             await game.play(game_id=game_id)
