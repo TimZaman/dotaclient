@@ -127,23 +127,21 @@ class Policy(nn.Module):
 
         action_target_unit = action_target_unit.squeeze(2)  # (b, s, 1, units) -> (b, s, units)
 
-        # Action space noise?
-        # action_scores_enum += (torch.randn(action_scores_enum.shape) * 1)
-        # TODO(tzaman): masking and softmax should be happening here.
-
-        action_dict = dict(
-            enum=F.softmax(action_scores_enum, dim=2),  # (b, s, 3)
-            x=F.softmax(action_scores_x, dim=2),  # (b, s, 9)
-            y=F.softmax(action_scores_y, dim=2),  # (b, s, 9)
+        # Return logits
+        return {
+            'enum': action_scores_enum,  # (b, s, 3)
+            'x': action_scores_x,  # (b, s, 9)
+            'y': action_scores_y,  # (b, s, 9)
             # delay=F.softmax(action_delay_enum, dim=2),
-            target_unit=F.softmax(action_target_unit, dim=2),  # (b, s, units)
-        )
-        return action_dict, hidden
+            'target_unit': action_target_unit # (b, s, units)
+        }, hidden
 
     @staticmethod
-    def flatten_action_dict(inputs):
-        """Flattens dicts with probabilities per actions to a dense (probability) tensor"""
-        return torch.cat([inputs['enum'], inputs['x'], inputs['y'], inputs['target_unit']], dim=2)
+    def masked_softmax(x, mask, dim=2, epsilon=1e-5):
+        exps = torch.exp(x)
+        masked_exps = exps * mask.float()
+        masked_sums = masked_exps.sum(dim, keepdim=True) + epsilon
+        return (masked_exps/masked_sums)
 
     ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16}
 
@@ -157,6 +155,19 @@ class Policy(nn.Module):
                 t[i + inputs[key]] = 1
             i += val
         return t
+
+    @staticmethod
+    def flatten_head(inputs, dim=2):
+        return torch.cat(list(inputs.values()), dim=dim)
+
+    @staticmethod
+    def unpack_heads(inputs):
+        return {
+            'enum': inputs[..., :3],
+            'x': inputs[..., 3:3+9],
+            'y': inputs[..., 3+9:3+9+9],
+            'target_unit': inputs[..., 3+9+9:],
+        }
 
     @classmethod
     def flat_actions_to_headmask(cls, inputs):
@@ -183,21 +194,17 @@ class Policy(nn.Module):
 
     @staticmethod
     def sample_action(probs, espilon=0.15):
-        if torch.rand(1) < espilon:
-            # return torch.randint(probs.size(2), [1, 1])
-            probs = (probs > 0).reshape(1, 1, -1).float()
-            probs += 1e-7  # Add eps to avoid pytorch negative issue.
-            return Categorical(probs).sample()
-        else:
-            # Greedy
-            return torch.argmax(probs, dim=2)
+        # if torch.rand(1) < espilon:
+        #     # return torch.randint(probs.size(2), [1, 1])
+        #     probs = (probs > 0).reshape(1, 1, -1).float()
+        #     probs += 1e-7  # Add eps to avoid pytorch negative issue.
+        #     return Categorical(probs).sample()
+        # else:
+        #     # Greedy
+        #     return torch.argmax(probs, dim=2)
         
-        # # Stochastic
-        # return Categorical(probs).sample()
-
-    @staticmethod
-    def action_log_prob(probs, sample):
-        return Categorical(probs).log_prob(sample)
+        # Stochastic
+        return Categorical(probs).sample()
 
     @classmethod
     def select_actions(cls, head_prob_dict):
@@ -212,12 +219,32 @@ class Policy(nn.Module):
             action_dict['x'] = cls.sample_action(head_prob_dict['x'])
             action_dict['y'] = cls.sample_action(head_prob_dict['y'])
         elif action_dict['enum'] == 2:  # Attack
-            if head_prob_dict['target_unit'].size(1) != 0:
-                action_dict['target_unit'] = cls.sample_action(head_prob_dict['target_unit'])
+            action_dict['target_unit'] = cls.sample_action(head_prob_dict['target_unit'])
         else:
             ValueError("Invalid Action Selection.")
 
         return action_dict
+
+    @classmethod
+    def head_masks(cls, selections):
+        masks = {}
+        for key, val in cls.ACTION_OUTPUT_COUNTS.items():
+            fn = torch.ones if key in selections else torch.zeros
+            masks[key] = fn(1, 1, val).byte()
+        return masks
+
+    @classmethod
+    def action_masks(cls, unit_handles):
+        """Mask the head with possible actions."""
+        # Mark your own unit as invalid
+        masks = {key: torch.ones(1, 1, val).byte() for key, val in cls.ACTION_OUTPUT_COUNTS.items()}
+        valid_units = unit_handles != -1
+        valid_units[0] = 0 # The 'self' hero can never be targetted.
+        if not valid_units.any():
+            # All units invalid, so we cannot choose the high-level attack head:
+            masks['enum'][0, 0, 2] = 0
+        masks['target_unit'][0, 0] = valid_units
+        return masks
 
     @staticmethod
     def mask_heads(head_prob_dict, unit_handles):

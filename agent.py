@@ -244,7 +244,8 @@ class Player:
         self.use_latest_model= use_latest_model
 
         self.policy_inputs = []
-        self.actions = []
+        self.vec_actions = []
+        self.vec_selected_heads_mask = []
         self.rewards = []
         self.hidden = None
         self.drawing = drawing
@@ -313,7 +314,6 @@ class Player:
         logger.debug('_send_experience_rmq')
 
         # Pack all the policy inputs into dense tensors
-
         packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
         packed_rewards = self.pack_rewards(inputs=self.rewards)
 
@@ -322,7 +322,8 @@ class Player:
             'team_id': self.team_id,
             'player_id': self.player_id,
             'states': packed_policy_inputs,
-            'actions': torch.stack(self.actions),  # stack or cat?
+            'actions': torch.stack(self.vec_actions),  # stack or cat?
+            'masks': torch.stack(self.vec_selected_heads_mask),
             'rewards': packed_rewards,
             'weight_version': self.policy.weight_version,
             'canvas': self.drawing.canvas,
@@ -347,7 +348,7 @@ class Player:
 
         # Reset states.
         self.policy_inputs = []
-        self.actions = []
+        self.vec_actions = []
         self.rewards = []
 
     @staticmethod
@@ -393,7 +394,7 @@ class Player:
                 i += 1
         return m, handles
 
-    def select_action(self, world_state, hidden):
+    def select_action(self, world_state):
         # Preprocess the state
         hero_unit = get_unit(world_state, player_id=self.player_id)
 
@@ -452,6 +453,10 @@ class Player:
             if not self.creeps_had_spawned:
                 raise ValueError('Creeps have not spawned at timestep {}'.format(world_state.dota_time))
 
+        # Select valid actions. This mask contains all viable actions.
+        action_masks = Policy.action_masks(unit_handles=unit_handles)
+        logger.debug('action_masks:\n' + pformat(action_masks))
+
         policy_input = dict(
             env=env_state,
             allied_heroes=allied_heroes,
@@ -460,17 +465,29 @@ class Player:
             enemy_nonheroes=enemy_nonheroes,
         )
 
-        head_prob_dict, hidden = self.policy.single(**policy_input, hidden=hidden)
+        head_logits_dict, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
 
-        logger.debug('head_prob_dict:\n' + pformat(head_prob_dict))
+        logger.debug('head_logits_dict:\n' + pformat(head_logits_dict))
 
-        head_prob_dict = self.policy.mask_heads(head_prob_dict, unit_handles)
+        # Perform a masked softmax
+        head_prob_dict = {}
+        for key in head_logits_dict:
+            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=action_masks[key])
 
-        logger.debug('head_prob_dict (masked) :\n' + pformat(head_prob_dict))
+        logger.debug('head_prob_dict (masked):\n' + pformat(head_prob_dict))
 
-        action_dict = self.policy.select_actions(head_prob_dict=head_prob_dict)
+        action_dict = Policy.select_actions(head_prob_dict=head_prob_dict)
 
-        return action_dict, policy_input, unit_handles, hidden
+        # Given the action selections, get the head mask.
+        head_masks = Policy.head_masks(selections=action_dict)
+        logger.debug('head_masks:\n' + pformat(head_masks))
+
+        # Combine the head mask and the selection mask, to get all relevant probabilities of the
+        # current action.
+        selected_heads_mask = {key: head_masks[key] & action_masks[key] for key in head_masks}
+        logger.debug('selected_heads_mask:\n' + pformat(selected_heads_mask))
+
+        return policy_input, action_dict, selected_heads_mask, unit_handles
 
     def action_to_pb(self, action_dict, state, unit_handles):
         # TODO(tzaman): Recrease the scope of this function. Make it a converter only.
@@ -505,14 +522,13 @@ class Player:
         return action_pb
 
     def obs_to_action(self, obs):
-        action_dict, policy_input, unit_handles, self.hidden = self.select_action(
+        policy_input, action_dict, selected_heads_mask, unit_handles = self.select_action(
             world_state=obs,
-            hidden=self.hidden,
         )
 
-        self.actions.append(self.policy.flatten_selections(action_dict))
-
         self.policy_inputs.append(policy_input)
+        self.vec_actions.append(Policy.flatten_selections(action_dict))
+        self.vec_selected_heads_mask.append(Policy.flatten_head(inputs=selected_heads_mask).view(-1))
   
         logger.debug('action:\n' + pformat(action_dict))
 

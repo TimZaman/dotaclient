@@ -29,6 +29,7 @@ from policy import REWARD_KEYS
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+# torch.set_printoptions(profile="full")
 
 torch.manual_seed(7)
 
@@ -160,18 +161,19 @@ class MessageQueue:
             self._conn.close()
 
 class Sequence:
-    def __init__(self, game_id, states, actions, rewards, advantages, weight_version, team_id):
+    def __init__(self, game_id, states, actions, masks, rewards, advantages, weight_version, team_id):
         self.game_id = game_id
-        self.weight_version = weight_version
-        self.team_id = team_id
         self.states = states
         self.actions = actions
+        self.masks = masks
         self.rewards = rewards
         self.advantages = advantages
+        self.weight_version = weight_version
+        self.team_id = team_id
 
         # Create a vector with the n-hot mask of actions.
-        self.vec_action_mask = self.actions.view(-1)
-        self.vec_head_mask = Policy.flat_actions_to_headmask(self.actions).view(-1)
+        self.vec_action_mask = self.actions.view(-1).detach()
+        self.vec_head_mask = self.masks.detach()
 
         # Count the amount of (multi-head) actions taken for each step.
         action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
@@ -180,13 +182,19 @@ class Sequence:
         self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
 
     def calculate_old_probs(self, policy):
-        head_prob_dict, _ = policy.sequence(**self.states, hidden=None)
-        flat_probs = policy.flatten_action_dict(head_prob_dict)
-        vec_probs_all = flat_probs.view(-1)
+        head_logits_dict, _ = policy.sequence(**self.states, hidden=None)
+        mask_dict = Policy.unpack_heads(self.masks)
+        # Perform a masked softmax
+        head_prob_dict = {}
+        for key in head_logits_dict:
+            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
+
+        vec_probs_all = policy.flatten_head(head_prob_dict).view(-1)
 
         # Now mask the probs by the selection
         self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
         self.vec_old_probs = self.vec_old_probs.detach()
+
 
 
 def all_gather(t):
@@ -332,6 +340,7 @@ class DotaOptimizer:
         # These should be padded and then sliced into separate experiences.
 
         actions = data['actions']
+        masks = data['masks']  # selected heads mask
         rewards = data['rewards']
         states = data['states']
 
@@ -350,6 +359,7 @@ class DotaOptimizer:
                 3: (0, 0, 0, 0, 0, pad),
             }
             actions = torch.nn.functional.pad(actions, pad=dim_pad[actions.dim()], mode='constant', value=0)
+            masks = torch.nn.functional.pad(masks, pad=dim_pad[masks.dim()], mode='constant', value=0)
             rewards = np.pad(rewards, ((0, pad), (0, 0)), mode='constant')
 
             for key in states:
@@ -374,6 +384,7 @@ class DotaOptimizer:
                 game_id=data['game_id'],
                 states=sliced_states,
                 actions=actions[start:end, :].detach(),
+                masks=masks[start:end, :].detach(),
                 rewards=rewards[start:end, :],
                 advantages=advantages[start:end],
                 weight_version=data['weight_version'],
@@ -384,6 +395,10 @@ class DotaOptimizer:
             sequence.calculate_old_probs(policy=self.policy_old)
             sequences.append(sequence)
         return sequences
+
+    @staticmethod
+    def list_of_dicts_to_dict_of_lists(x):
+        return {k: torch.stack([d[k] for d in x]) for k in x[0]}
 
     def run(self):
         assert self.seq_per_epoch >= self.batch_size
@@ -423,17 +438,18 @@ class DotaOptimizer:
                 # Divide into batches
                 batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
                 for batch in batches:
-                    loss, entropy = self.train(experiences=batch)
+                    loss, entropy_d = self.train(experiences=batch)
                     losses.append(loss)
-                    entropies.append(entropy)
+                    entropies.append(entropy_d)
             
             # Set the new policy as the old one.
             self.policy_old.load_state_dict(self.policy.state_dict())
 
             losses = torch.stack(losses)
             loss = losses.mean()
-            entropies = torch.stack(entropies)
-            entropy = entropies.mean()
+
+            entropies = self.list_of_dicts_to_dict_of_lists(entropies)
+            entropy = torch.stack(list(entropies.values())).sum(dim=1).mean()
 
             n_steps = len(experiences) * self.seq_len
             steps_per_s = n_steps / (time.time() - self.time_last_step)
@@ -459,6 +475,9 @@ class DotaOptimizer:
                 'avg_weight_age': avg_weight_age,
             }
 
+            for k, v in entropies.items():
+                metrics['entropy/{}'.format(k)] = v.mean()
+
             for k, v in reward_dict.items():
                 metrics['reward_per_sec/{}'.format(k)] = v
 
@@ -474,7 +493,6 @@ class DotaOptimizer:
                 
                 # Add per-iteration histograms
                 self.writer.add_histogram('losses', losses, it)
-                self.writer.add_histogram('entropies', entropies, it)
                 self.writer.add_histogram('rollout_lens', rollout_lens, it)
                 self.writer.add_histogram('weight_age', weight_ages, it)
 
@@ -523,7 +541,7 @@ class DotaOptimizer:
         # Batch together all experiences.
         vec_mh_rewards = torch.cat([e.vec_mh_rewards for e in experiences])
         vec_action_mask = torch.cat([e.vec_action_mask for e in experiences])
-        vec_head_mask = torch.cat([e.vec_head_mask for e in experiences])
+        head_mask = torch.stack([e.vec_head_mask for e in experiences])  # [b, s, 59]
         vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
 
         # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
@@ -539,10 +557,16 @@ class DotaOptimizer:
 
         # Notice there is no notion of loss masking here, this is unnessecary as we only work
         # use selected probabilties. E.g. when things were padded, nothing was selected, so no data.
+        head_logits_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
 
-        head_prob_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
-        flat_probs = self.policy.flatten_action_dict(head_prob_dict)
-        vec_probs_all = flat_probs.view(-1)
+        mask_dict = Policy.unpack_heads(head_mask)
+
+        # Perform a masked softmax
+        head_prob_dict = {}
+        for key in head_logits_dict:
+            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
+
+        vec_probs_all = Policy.flatten_head(head_prob_dict).view(-1)
 
         # Now mask the probs by the selection
         vec_selected_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
@@ -555,17 +579,40 @@ class DotaOptimizer:
         surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards
         policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
 
-        # Entropy. Get the probability of the selected heads only.
-        vec_head_probs = torch.masked_select(input=vec_probs_all, mask=vec_head_mask)
-        entropy = -(vec_head_probs * torch.log(vec_head_probs)).mean()  # Always positive
-        
+        # Check the entropy per head.
+        entropies = {}
+        for key in head_logits_dict:
+            p = head_prob_dict[key]
+
+            # Because of the masking, to get ln(p), we need to do some tricks. We set values
+            # that should be masked out to 1, because ln(1) = 0, they they won't become NaN.
+            # Although we could mask these out later, and we do, pytorch seems to want us to do
+            # this here already.
+            logp = p.clone()
+            logp[~mask_dict[key]] = 1
+            logp = torch.log(logp)
+
+            e = p * logp
+
+            e[~mask_dict[key]] = 0  # Zero out any non-used actions
+
+            e = e.sum(dim=2)
+            e = e[e!=0]  # Filter out zero entries (padded)
+            if e.size(0) == 0:
+                # When no action of this kind was chosen.
+                e = torch.zeros([])
+
+            entropies[key] = -e.mean()
+
+        entropy = torch.stack(list(entropies.values())).sum()
+
         loss = policy_loss - entropy * self.entropy_coef
 
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
-        return loss, entropy
+        return loss, entropies
 
 
     def upload_model(self, version):
@@ -660,7 +707,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch-size", type=int, help="batch size", default=4)
     parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
-    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.05)
+    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.02)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
                         help="amount of experience messages to prefetch from mq", default=4)
