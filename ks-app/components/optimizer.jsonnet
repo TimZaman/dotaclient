@@ -41,7 +41,9 @@ local worker(replicas) = {
                         "--seq-len",
                         std.toString(params.seq_len),
                         "--learning-rate",
-                        std.toString(params.learning_rate)
+                        std.toString(params.learning_rate),
+                        "--entropy-coef",
+                        std.toString(params.entropy_coef)
                     ],
                     "command": [
                         "python3.7",
@@ -115,6 +117,8 @@ local worker(replicas) = {
                                     std.toString(params.seq_len),
                                     "--learning-rate",
                                     std.toString(params.learning_rate),
+                                    "--entropy-coef",
+                                    std.toString(params.entropy_coef),
                                     "--exp-dir",
                                     std.toString(params.expname),
                                     "--job-dir",
