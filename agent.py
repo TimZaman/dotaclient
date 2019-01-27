@@ -366,10 +366,10 @@ class Player:
                         continue
                 if i >= max_units:
                     break
-                rel_hp = (unit.health / unit.health_max) - 0.5
-                rel_mana = 0.5
+                rel_hp = 1.0 - (unit.health / unit.health_max)
+                rel_mana = 0.0
                 if unit.mana_max > 0:
-                    rel_mana = (unit.mana / unit.mana_max) - 0.5
+                    rel_mana = 1.0 - (unit.mana / unit.mana_max)
                 loc_x = unit.location.x / 7000.
                 loc_y = unit.location.y / 7000.
                 loc_z = (unit.location.z / 512.)-0.5
