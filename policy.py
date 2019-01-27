@@ -33,7 +33,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats = nn.Linear(9, 128)
+        self.affine_unit_basic_stats = nn.Linear(8, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -129,6 +129,7 @@ class Policy(nn.Module):
 
         # Action space noise?
         # action_scores_enum += (torch.randn(action_scores_enum.shape) * 1)
+        # TODO(tzaman): masking and softmax should be happening here.
 
         action_dict = dict(
             enum=F.softmax(action_scores_enum, dim=2),  # (b, s, 3)

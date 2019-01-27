@@ -357,7 +357,7 @@ class Player:
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
         handles = torch.full([max_units], -1)
-        m = torch.zeros(max_units, 9)
+        m = torch.zeros(max_units, 8)
         i = 0
         for unit in state.units:
             if unit.team_id == team_id and unit.is_alive and unit.unit_type in unit_types:
@@ -383,9 +383,10 @@ class Player:
                 # TODO(tzaman): use distance x,y
                 # distance_x = (distance_x / 3000)-0.5.
                 # distance_y = (distance_y / 3000)-0.5.
+                # TODO(tzaman): Add rel mana once it makes sense
                 m[i] = (
                     torch.tensor([
-                        rel_hp, rel_mana, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos,
+                        rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos,
                         in_attack_range,
                     ]))
                 handles[i] = unit.handle
