@@ -449,7 +449,7 @@ class DotaOptimizer:
             loss = losses.mean()
 
             entropies = self.list_of_dicts_to_dict_of_lists(entropies)
-            entropy = torch.stack(list(entropies.values())).sum(dim=1).mean()
+            entropy = torch.stack(list(entropies.values())).sum(dim=0).mean()
 
             n_steps = len(experiences) * self.seq_len
             steps_per_s = n_steps / (time.time() - self.time_last_step)
@@ -493,6 +493,7 @@ class DotaOptimizer:
                 
                 # Add per-iteration histograms
                 self.writer.add_histogram('losses', losses, it)
+                # self.writer.add_histogram('entropies', entropies, it)
                 self.writer.add_histogram('rollout_lens', rollout_lens, it)
                 self.writer.add_histogram('weight_age', weight_ages, it)
 
