@@ -105,8 +105,10 @@ def get_reward(prev_obs, obs, player_id):
     player_init = get_player(prev_obs, player_id=player_id)
     player = get_player(obs, player_id=player_id)
 
-    mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
-    mid_tower = get_mid_tower(obs, team_id=player.team_id)
+    good_mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
+    good_mid_tower = get_mid_tower(obs, team_id=player.team_id)
+    bad_mid_tower_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
+    bad_mid_tower = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
 
     # TODO(tzaman): make a nice reward container?
     reward = {key: 0. for key in REWARD_KEYS}
@@ -137,8 +139,13 @@ def get_reward(prev_obs, obs, player_id):
     denies = unit.denies - unit_init.denies
     reward['denies'] = denies * 0.2
 
-    # Tower hp reward. Note: towers have 1900 hp.
-    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
+    # Tower hp reward. Note: tier 1 towers have 1800 hp, t2 1900hp, t3 2000 hp, t4 2100 hp
+    norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 500.
+    if bad_mid_tower and bad_mid_tower_init:
+        norm_bad_tower_hp = (bad_mid_tower.health - bad_mid_tower_init.health) / 500.
+    else:
+        norm_bad_tower_hp = 1800. / 500.
+    reward['tower_hp'] = norm_good_tower_hp - norm_bad_tower_hp
 
     return reward
 
@@ -222,7 +229,8 @@ def get_mid_tower(state, team_id):
             and unit.team_id == team_id \
             and 'tower1_mid' in unit.name:
             return unit
-    raise ValueError("tower not found in state:\n{}".format(state))
+    return None
+    # raise ValueError("tower not found in state:\n{}".format(state))
 
 
 class Player:
@@ -439,7 +447,28 @@ class Player:
             max_units=16,
         )
 
-        unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles])
+        allied_towers, allied_tower_handles = self.unit_matrix(
+            state=world_state,
+            hero_unit=hero_unit,
+            unit_types=[
+                CMsgBotWorldState.UnitType.Value('TOWER')
+            ],
+            team_id=hero_unit.team_id,
+            max_units=11,
+        )
+
+        enemy_towers, enemy_tower_handles = self.unit_matrix(
+            state=world_state,
+            hero_unit=hero_unit,
+            unit_types=[
+                CMsgBotWorldState.UnitType.Value('TOWER')
+            ],
+            team_id=OPPOSITE_TEAM[hero_unit.team_id],
+            max_units=11,
+        )
+
+        unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles,
+                                  allied_tower_handles, enemy_tower_handles])
 
         if not self.creeps_had_spawned and world_state.dota_time > 0.:
             # Check that creeps have spawned. See dotaclient/issues/15.
@@ -458,6 +487,8 @@ class Player:
             enemy_heroes=enemy_heroes,
             allied_nonheroes=allied_nonheroes,
             enemy_nonheroes=enemy_nonheroes,
+            allied_towers=allied_towers,
+            enemy_towers=enemy_towers,
         )
 
         head_logits_dict, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)

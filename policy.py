@@ -40,8 +40,10 @@ class Policy(nn.Module):
         self.affine_unit_eh = nn.Linear(128, 128)
         self.affine_unit_anh = nn.Linear(128, 128)
         self.affine_unit_enh = nn.Linear(128, 128)
+        self.affine_unit_ath = nn.Linear(128, 128)
+        self.affine_unit_eth = nn.Linear(128, 128)
 
-        self.affine_pre_rnn = nn.Linear(640, 128)
+        self.affine_pre_rnn = nn.Linear(896, 128)
         self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1, batch_first=True)
 
         # self.ln = nn.LayerNorm(128)
@@ -66,9 +68,11 @@ class Policy(nn.Module):
             kwargs[k] = kwargs[k].unsqueeze(0)
         return self.__call__(**kwargs, hidden=hidden)
 
-    INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes']
+    INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes',
+                  'allied_towers', 'enemy_towers']
 
-    def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, hidden):
+    def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes,
+                allied_towers, enemy_towers, hidden):
         """Input as batch."""
         logger.debug('policy(inputs=\n{}'.format(
             pformat({'env': env,
@@ -76,6 +80,8 @@ class Policy(nn.Module):
             'enemy_heroes': enemy_heroes,
             'allied_nonheroes': allied_nonheroes,
             'enemy_nonheroes': enemy_nonheroes,
+            'allied_towers': allied_towers,
+            'enemy_towers': enemy_towers,
             })))
 
         # Environment.
@@ -101,12 +107,24 @@ class Policy(nn.Module):
         enh_embedding = self.affine_unit_enh(enh_basic)  # (b, s, units, n)
         enh_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
 
+        # Allied Towers.
+        ath_basic = F.relu(self.affine_unit_basic_stats(allied_towers))
+        ath_embedding = self.affine_unit_ath(ath_basic)  # (b, s, units, n)
+        ath_embedding_max, _ = torch.max(ath_embedding, dim=2)  # (b, s, n)
+
+        # Enemy Towers.
+        eth_basic = F.relu(self.affine_unit_basic_stats(enemy_towers))
+        eth_embedding = self.affine_unit_eth(eth_basic)  # (b, s, units, n)
+        eth_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
+
         # Create the full unit embedding
-        unit_embedding = torch.cat((ah_embedding, eh_embedding, anh_embedding, enh_embedding), dim=2)  # (b, s, units, n)
+        unit_embedding = torch.cat((ah_embedding, eh_embedding, anh_embedding, enh_embedding, ath_embedding,
+                                    eth_embedding), dim=2)  # (b, s, units, n)
         unit_embedding = torch.transpose(unit_embedding, dim0=3, dim1=2)  # (b, s, units, n) -> (b, s, n, units)
 
         # Combine for LSTM.
-        x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max), dim=2)  # (b, s, n)
+        x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max,
+                       ath_embedding_max, eth_embedding_max), dim=2)  # (b, s, n)
 
         x = F.relu(self.affine_pre_rnn(x))  # (b, s, n)
 
@@ -147,7 +165,7 @@ class Policy(nn.Module):
         masked_sums = masked_exps.sum(dim, keepdim=True)
         return (masked_exps / (masked_sums + eps))
 
-    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16}
+    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16+11+11}
 
     @classmethod
     def flatten_selections(cls, inputs):
@@ -191,7 +209,10 @@ class Policy(nn.Module):
 
         target_unit = inputs[:, 3+9+9:]
         target_unith = target_unit.any(dim=1, keepdim=True)
-        target_unith = target_unith.repeat(1, 38)  # 1+5+16+16
+        # num units is 1 (allied heroes - self only) + 5 enemy units
+        # + 16 allied creep, +16 enemy creep, +11 allied towers
+        # + 11 enemy towers
+        target_unith = target_unith.repeat(1, 60)  # 1+5+16+16+11+11
 
         # Put it back together
         return torch.cat([enumh, xh, yh, target_unith], dim=1)
