@@ -109,41 +109,40 @@ def get_reward(prev_obs, obs, player_id):
     mid_tower = get_mid_tower(obs, team_id=player.team_id)
 
     # TODO(tzaman): make a nice reward container?
-    # TODO(tzaman): make reward factors configurable.
     reward = {key: 0. for key in REWARD_KEYS}
 
     # XP Reward
-    # xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
-    # xp = get_total_xp(level=unit.level, xp_needed_to_level=unit.xp_needed_to_level)
-    # reward['xp'] = (xp - xp_init) * 0.002  # One creep is around 40 xp.
+    xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
+    xp = get_total_xp(level=unit.level, xp_needed_to_level=unit.xp_needed_to_level)
+    reward['xp'] = (xp - xp_init) * 0.002  # One creep is around 40 xp.
 
-    # # HP and death reward
-    # if unit_init.is_alive and unit.is_alive:
-    #     hp_rel_init = unit_init.health / unit_init.health_max
-    #     hp_rel = unit.health / unit.health_max
-    #     low_hp_factor = 1. + (1 - hp_rel)**2  # hp_rel=0 -> 2; hp_rel=0.5->1.25; hp_rel=1 -> 1.
-    #     reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor
-    # else:
-    #     reward['hp'] = 0
+    # HP and death reward
+    if unit_init.is_alive and unit.is_alive:
+        hp_rel_init = unit_init.health / unit_init.health_max
+        hp_rel = unit.health / unit.health_max
+        low_hp_factor = 1. + (1 - hp_rel)**2  # hp_rel=0 -> 2; hp_rel=0.5->1.25; hp_rel=1 -> 1.
+        reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor
+    else:
+        reward['hp'] = 0
 
-    # # Kill and death rewards
-    # reward['kills'] = (player.kills - player_init.kills) * 3.0
-    # reward['death'] = (player.deaths - player_init.deaths) * -3.0
+    # Kill and death rewards
+    reward['kills'] = (player.kills - player_init.kills) * 3.0
+    reward['death'] = (player.deaths - player_init.deaths) * -3.0
 
-    # # Last-hit reward
-    # lh = unit.last_hits - unit_init.last_hits
-    # reward['lh'] = lh * 0.5
+    # Last-hit reward
+    lh = unit.last_hits - unit_init.last_hits
+    reward['lh'] = lh * 0.5
 
-    # # Deny reward
-    # denies = unit.denies - unit_init.denies
-    # reward['denies'] = denies * 0.2
+    # Deny reward
+    denies = unit.denies - unit_init.denies
+    reward['denies'] = denies * 0.2
 
-    # # Tower hp reward. Note: towers have 1900 hp.
-    # reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
+    # Tower hp reward. Note: towers have 1900 hp.
+    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
 
-    # # Microreward for distance to help nudge to mid initially.
-    # dist_mid = math.sqrt(unit.location.x**2 + unit.location.y**2)
-    # reward['dist'] = -(dist_mid / 8000.) * 0.001
+    # Microreward for distance to help nudge to mid initially.
+    dist_mid = math.sqrt(unit.location.x**2 + unit.location.y**2)
+    reward['dist'] = -(dist_mid / 8000.) * 0.001
 
     return reward
 
@@ -284,8 +283,6 @@ class Player:
                 self.rewards[-1]['win'] = 1
             else:
                 self.rewards[-1]['win'] = -1
-        else:
-            self.rewards[-1]['win'] = -1  # TODO(tzaman): HACK!
 
     @staticmethod
     def pack_policy_inputs(inputs):
