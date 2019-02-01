@@ -584,30 +584,29 @@ class DotaOptimizer:
         entropies = {}
         for key in head_logits_dict:
             p = head_prob_dict[key]
-
             # Because of the masking, to get ln(p), we need to do some tricks. We set values
             # that should be masked out to 1, because ln(1) = 0, they they won't become NaN.
             # Although we could mask these out later, and we do, pytorch seems to want us to do
             # this here already.
             logp = p.clone()
             logp[~mask_dict[key]] = 1
-            logp = torch.log(logp)
-
+            logp = torch.log(logp + eps)
             e = p * logp
-
             e[~mask_dict[key]] = 0  # Zero out any non-used actions
-
             e = e.sum(dim=2)
             e = e[e!=0]  # Filter out zero entries (padded)
             if e.size(0) == 0:
                 # When no action of this kind was chosen.
                 e = torch.zeros([])
-
+            
             entropies[key] = -e.mean()
 
         entropy = torch.stack(list(entropies.values())).sum()
+        entropy_loss = - entropy * self.entropy_coef
+        loss = policy_loss + entropy_loss
 
-        loss = policy_loss - entropy * self.entropy_coef
+        if torch.isnan(loss):
+            raise ValueError('loss={}, policy_loss={}, entropy_loss={}'.format(loss, policy_loss, entropy_loss))
 
         self.optimizer.zero_grad()
         loss.backward()
