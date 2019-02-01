@@ -4,6 +4,8 @@
 
 DotaClient is a reinforcement learning system to train RL agents to play Dota 2 through self-play.
 
+This is built upon the [DotaService](https://github.com/TimZaman/DotaService) project, that exposes the game of Dota2 as a (grpc) service for synchronous play.
+
 <img src="dotaclient.png" alt="dotaclient schema" width="400"/>
 
 * Distributed Agents self-playing Dota 2.
@@ -13,7 +15,6 @@ DotaClient is a reinforcement learning system to train RL agents to play Dota 2 
 ## Prerequisites
 
 * Kubeflow's [PyTorch Operator](https://github.com/kubeflow/pytorch-operator)
-* Google Cloud Storage (GCS)
 * Kubernetes Cluster (e.g. GKE).
 * Build the [dota docker image](https://github.com/TimZaman/DotaService)
 * Build the [dotaservice docker image](https://github.com/TimZaman/DotaService)
