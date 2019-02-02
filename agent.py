@@ -246,6 +246,7 @@ class Player:
         self.policy_inputs = []
         self.vec_actions = []
         self.vec_selected_heads_mask = []
+        self.values = []
         self.rewards = []
         self.hidden = None
         self.drawing = drawing
@@ -258,7 +259,7 @@ class Player:
             version, state_dict = weight_store.oldest_model()
 
         self.policy = Policy()
-        self.policy.load_state_dict(state_dict, strict=True)
+        self.policy.load_state_dict(state_dict, strict=False)  # TODO(tzaman): HACK: should be true
         self.policy.weight_version = version
 
         logger.info('Player {} using weights version {}'.format(
@@ -322,7 +323,8 @@ class Player:
             'team_id': self.team_id,
             'player_id': self.player_id,
             'states': packed_policy_inputs,
-            'actions': torch.stack(self.vec_actions),  # stack or cat?
+            'actions': torch.stack(self.vec_actions),
+            'values': torch.stack(self.values),
             'masks': torch.stack(self.vec_selected_heads_mask),
             'rewards': packed_rewards,
             'weight_version': self.policy.weight_version,
@@ -465,9 +467,10 @@ class Player:
             enemy_nonheroes=enemy_nonheroes,
         )
 
-        head_logits_dict, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
+        head_logits_dict, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
 
         logger.debug('head_logits_dict:\n' + pformat(head_logits_dict))
+        logger.debug('value={}'.format(value))
 
         # Perform a masked softmax
         head_prob_dict = {}
@@ -487,7 +490,7 @@ class Player:
         selected_heads_mask = {key: head_masks[key] & action_masks[key] for key in head_masks}
         logger.debug('selected_heads_mask:\n' + pformat(selected_heads_mask))
 
-        return policy_input, action_dict, selected_heads_mask, unit_handles
+        return policy_input, action_dict, selected_heads_mask, unit_handles, value
 
     def action_to_pb(self, action_dict, state, unit_handles):
         # TODO(tzaman): Recrease the scope of this function. Make it a converter only.
@@ -522,13 +525,14 @@ class Player:
         return action_pb
 
     def obs_to_action(self, obs):
-        policy_input, action_dict, selected_heads_mask, unit_handles = self.select_action(
+        policy_input, action_dict, selected_heads_mask, unit_handles, value = self.select_action(
             world_state=obs,
         )
 
         self.policy_inputs.append(policy_input)
         self.vec_actions.append(Policy.flatten_selections(action_dict))
         self.vec_selected_heads_mask.append(Policy.flatten_head(inputs=selected_heads_mask).view(-1))
+        self.values.append(value)
   
         logger.debug('action:\n' + pformat(action_dict))
 

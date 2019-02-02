@@ -51,6 +51,7 @@ class Policy(nn.Module):
         self.affine_move_y = nn.Linear(128, self.N_MOVE_ENUMS)
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
         self.affine_unit_attention = nn.Linear(128, 128)
+        self.affine_value = nn.Linear(128, 1)
 
     def single(self, hidden, **kwargs):
         """Inputs a single element of a sequence."""
@@ -113,28 +114,30 @@ class Policy(nn.Module):
 
         # LSTM
         x, hidden = self.rnn(x, hidden)  # (b, s, n)
-        
+
+        # Unit attention.
+        unit_attention = self.affine_unit_attention(x)  # (b, s, n)
+        unit_attention = unit_attention.unsqueeze(2)  # (b, s, n) ->  (b, s, 1, n)
+
         # Heads.
         action_scores_x = self.affine_move_x(x)
         action_scores_y = self.affine_move_y(x)
         action_scores_enum = self.affine_head_enum(x)
         # action_delay_enum = self.affine_head_delay(x)
-        action_unit_attention = self.affine_unit_attention(x)  # (b, s, n)
-
-        action_unit_attention = action_unit_attention.unsqueeze(2)  # (b, s, n) ->  (b, s, 1, n)
-
-        action_target_unit = torch.matmul(action_unit_attention, unit_embedding)   # (b, s, 1, n) * (b, s, n, units) = (b, s, 1, units)
-
+        action_target_unit = torch.matmul(unit_attention, unit_embedding)   # (b, s, 1, n) * (b, s, n, units) = (b, s, 1, units)
         action_target_unit = action_target_unit.squeeze(2)  # (b, s, 1, units) -> (b, s, units)
+        value = self.affine_value(x)  # (b, s, 1)
 
-        # Return logits
-        return {
+        d = {
             'enum': action_scores_enum,  # (b, s, 3)
             'x': action_scores_x,  # (b, s, 9)
             'y': action_scores_y,  # (b, s, 9)
             # delay=F.softmax(action_delay_enum, dim=2),
             'target_unit': action_target_unit # (b, s, units)
-        }, hidden
+        }
+
+        # Return
+        return d, value, hidden
 
     @staticmethod
     def masked_softmax(x, mask, dim=2, epsilon=1e-5):

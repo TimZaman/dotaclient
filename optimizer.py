@@ -161,13 +161,13 @@ class MessageQueue:
             self._conn.close()
 
 class Sequence:
-    def __init__(self, game_id, states, actions, masks, rewards, advantages, weight_version, team_id):
+    def __init__(self, game_id, states, actions, masks, rewards, discounted_rewards, weight_version, team_id):
         self.game_id = game_id
         self.states = states
         self.actions = actions
         self.masks = masks
         self.rewards = rewards
-        self.advantages = advantages
+        self.discounted_rewards = discounted_rewards
         self.weight_version = weight_version
         self.team_id = team_id
 
@@ -177,7 +177,7 @@ class Sequence:
 
         # Count the amount of (multi-head) actions taken for each step.
         action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
-        vec_rewards = np.ravel(self.advantages)  # flat view
+        vec_rewards = np.ravel(self.discounted_rewards)  # flat view
         # Repeat the rewards where a step has multiple actions, the reward gets repeated.
         self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
 
@@ -343,6 +343,7 @@ class DotaOptimizer:
         masks = data['masks']  # selected heads mask
         rewards = data['rewards']
         states = data['states']
+        values = data['values']  # From the value head
 
         # If applicable, pad the rollout so we can cut into distinct sequences.
         rollout_len = data['actions'].size(0)
@@ -351,6 +352,8 @@ class DotaOptimizer:
         n_sequences = rollout_len // self.seq_len if pad == 0 else rollout_len // self.seq_len + 1
 
         logger.debug('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
+
+        print('values.shape=', values.shape)
 
         if pad != 0:
             dim_pad = {
@@ -367,7 +370,7 @@ class DotaOptimizer:
 
         # The advantage needs to be calculated here, in order to get information from the full
         # rollout.
-        advantages = discount(x=np.sum(rewards, axis=1), gamma=0.98)
+        discounted_rewards = discount(x=np.sum(rewards, axis=1), gamma=0.98)
 
         # Slice the rollout into distinct sequences.
         sequences = []
@@ -386,7 +389,7 @@ class DotaOptimizer:
                 actions=actions[start:end, :].detach(),
                 masks=masks[start:end, :].detach(),
                 rewards=rewards[start:end, :],
-                advantages=advantages[start:end],
+                discounted_rewards=discounted_rewards[start:end],
                 weight_version=data['weight_version'],
                 team_id=data['team_id'],
             )
@@ -707,7 +710,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch-size", type=int, help="batch size", default=4)
     parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
-    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.02)
+    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.01)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
                         help="amount of experience messages to prefetch from mq", default=4)
