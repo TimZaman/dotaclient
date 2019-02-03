@@ -167,7 +167,6 @@ class Sequence:
         self.actions = actions
         self.masks = masks
         self.rewards = rewards
-        self.discounted_rewards = discounted_rewards
         self.weight_version = weight_version
         self.team_id = team_id
 
@@ -177,12 +176,12 @@ class Sequence:
 
         # Count the amount of (multi-head) actions taken for each step.
         action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
-        vec_rewards = np.ravel(self.discounted_rewards)  # flat view
+        self.discounted_rewards = np.ravel(discounted_rewards)  # flat view
         # Repeat the rewards where a step has multiple actions, the reward gets repeated.
-        self.vec_mh_rewards = torch.from_numpy(np.repeat(vec_rewards, action_sum_per_step))
+        self.vec_mh_rewards = torch.from_numpy(np.repeat(self.discounted_rewards, action_sum_per_step))
 
     def calculate_old_probs(self, policy):
-        head_logits_dict, _ = policy.sequence(**self.states, hidden=None)
+        head_logits_dict, _, _ = policy.sequence(**self.states, hidden=None)
         mask_dict = Policy.unpack_heads(self.masks)
         # Perform a masked softmax
         head_prob_dict = {}
@@ -194,7 +193,6 @@ class Sequence:
         # Now mask the probs by the selection
         self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
         self.vec_old_probs = self.vec_old_probs.detach()
-
 
 
 def all_gather(t):
@@ -230,6 +228,7 @@ class DotaOptimizer:
         self.exp_dir = exp_dir
         self.job_dir = job_dir
         self.entropy_coef = entropy_coef
+        self.vf_coef = 0.5
 
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
@@ -343,7 +342,6 @@ class DotaOptimizer:
         masks = data['masks']  # selected heads mask
         rewards = data['rewards']
         states = data['states']
-        values = data['values']  # From the value head
 
         # If applicable, pad the rollout so we can cut into distinct sequences.
         rollout_len = data['actions'].size(0)
@@ -352,8 +350,6 @@ class DotaOptimizer:
         n_sequences = rollout_len // self.seq_len if pad == 0 else rollout_len // self.seq_len + 1
 
         logger.debug('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
-
-        print('values.shape=', values.shape)
 
         if pad != 0:
             dim_pad = {
@@ -431,6 +427,7 @@ class DotaOptimizer:
 
             losses = []
             entropies = []
+            advantages = []
             for ep in range(self.epochs):
                 logger.info(' epoch {}/{}'.format(ep + 1, self.epochs))
                 self.mq.process_data_events()
@@ -441,15 +438,19 @@ class DotaOptimizer:
                 # Divide into batches
                 batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
                 for batch in batches:
-                    loss, entropy_d = self.train(experiences=batch)
+                    loss, entropy_d, advantage = self.train(experiences=batch)
                     losses.append(loss)
                     entropies.append(entropy_d)
+                    advantages.append(advantage)
             
             # Set the new policy as the old one.
             self.policy_old.load_state_dict(self.policy.state_dict())
 
             losses = torch.stack(losses)
             loss = losses.mean()
+
+            advantages = torch.stack(advantages)
+            advantage = advantages.mean()
 
             entropies = self.list_of_dicts_to_dict_of_lists(entropies)
             entropy = torch.stack(list(entropies.values())).sum(dim=0).mean()
@@ -474,6 +475,7 @@ class DotaOptimizer:
                 'reward_per_sec/sum': reward_per_sec,
                 'loss': loss,
                 'entropy': entropy,
+                'advantage': advantage,
                 'avg_rollout_len': avg_rollout_len,
                 'avg_weight_age': avg_weight_age,
             }
@@ -484,8 +486,8 @@ class DotaOptimizer:
             for k, v in reward_dict.items():
                 metrics['reward_per_sec/{}'.format(k)] = v
 
-            logger.info('steps_per_s={:.2f}, avg_weight_age={:.1f}, reward_per_sec={:.4f}, loss={:.4f}, entropy={:.3f}'.format(
-                steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy)))
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.1f}, reward_per_sec={:.4f}, loss={:.4f}, entropy={:.3f}, advantage={:.3f}'.format(
+                steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy), float(advantage)))
 
             if self.checkpoint:
                 # TODO(tzaman): re-introduce distributed metrics. See commits from december 2017.
@@ -548,11 +550,6 @@ class DotaOptimizer:
         head_mask = torch.stack([e.vec_head_mask for e in experiences])  # [b, s, 59]
         vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
 
-        # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
-        # pre-calculated mean and eps scalars to normalize by, since we will be going over this
-        # each piece of experience an 'episode' amount of times.
-        vec_mh_rewards = self.normalize(vec_mh_rewards)
-
         states = {key: [] for key in Policy.INPUT_KEYS}
         for e in experiences:
             for key in e.states:
@@ -561,7 +558,10 @@ class DotaOptimizer:
 
         # Notice there is no notion of loss masking here, this is unnessecary as we only work
         # use selected probabilties. E.g. when things were padded, nothing was selected, so no data.
-        head_logits_dict, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
+        head_logits_dict, values, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
+
+        # Advantage
+        advantage = values - torch.from_numpy(e.discounted_rewards)
 
         mask_dict = Policy.unpack_heads(head_mask)
 
@@ -577,6 +577,11 @@ class DotaOptimizer:
 
         # Probability ratio
         rt = vec_selected_probs / (vec_old_probs + eps)
+
+        # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
+        # pre-calculated mean and eps scalars to normalize by, since we will be going over this
+        # each piece of experience an 'episode' amount of times.
+        vec_mh_rewards = self.normalize(vec_mh_rewards)
 
         # PPO Objective
         surr1 = rt * vec_mh_rewards
@@ -605,17 +610,19 @@ class DotaOptimizer:
             entropies[key] = -e.mean()
 
         entropy = torch.stack(list(entropies.values())).sum()
-        entropy_loss = - entropy * self.entropy_coef
-        loss = policy_loss + entropy_loss
+        entropy_loss = self.entropy_coef * entropy
+        advantage_loss = self.vf_coef * (advantage.pow(2)).mean()
+        loss = policy_loss - entropy_loss + advantage_loss
 
         if torch.isnan(loss):
-            raise ValueError('loss={}, policy_loss={}, entropy_loss={}'.format(loss, policy_loss, entropy_loss))
+            raise ValueError('loss={}, policy_loss={}, entropy_loss={}, advantage_loss={}'.format(
+                loss, policy_loss, entropy_loss, advantage_loss))
 
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
-        return loss, entropies
+        return loss, entropies, advantage.mean()
 
 
     def upload_model(self, version):

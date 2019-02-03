@@ -197,17 +197,18 @@ class Policy(nn.Module):
 
     @staticmethod
     def sample_action(probs, espilon=0.15):
-        # if torch.rand(1) < espilon:
-        #     # return torch.randint(probs.size(2), [1, 1])
-        #     probs = (probs > 0).reshape(1, 1, -1).float()
-        #     probs += 1e-7  # Add eps to avoid pytorch negative issue.
-        #     return Categorical(probs).sample()
-        # else:
-        #     # Greedy
-        #     return torch.argmax(probs, dim=2)
+        # TODO(tzaman): Have the sampler kind be user-configurable.
+        if torch.rand(1) < espilon:
+            # return torch.randint(probs.size(2), [1, 1])
+            probs = (probs > 0).reshape(1, 1, -1).float()
+            probs += 1e-7  # Add eps to avoid pytorch negative issue.
+            return Categorical(probs).sample()
+        else:
+            # Greedy
+            return torch.argmax(probs, dim=2)
         
         # Stochastic
-        return Categorical(probs).sample()
+        # return Categorical(probs).sample()
 
     @classmethod
     def select_actions(cls, head_prob_dict):
