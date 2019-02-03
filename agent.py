@@ -648,11 +648,11 @@ class Game:
                 prev_obs[team_id] = obs
 
             # Subtract eachothers rewards
-            # if step > 0:
-            #     rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
-            #     dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
-            #     players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
-            #     players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
+            if step > 0:
+                rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
+                dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
+                players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
+                players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
 
             for player in players.values():
                 if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:

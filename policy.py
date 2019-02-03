@@ -16,7 +16,7 @@ logger.setLevel(logging.INFO)
 TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
 
-REWARD_KEYS = ['win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']  # HACK! use from agent!
+REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']
 
 class Policy(nn.Module):
 
