@@ -107,8 +107,8 @@ def get_reward(prev_obs, obs, player_id):
 
     good_mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
     good_mid_tower = get_mid_tower(obs, team_id=player.team_id)
-    bad_mid_tower_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
-    bad_mid_tower = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
+    #bad_mid_tower_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
+    #bad_mid_tower = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
 
     # TODO(tzaman): make a nice reward container?
     reward = {key: 0. for key in REWARD_KEYS}
@@ -141,11 +141,9 @@ def get_reward(prev_obs, obs, player_id):
 
     # Tower hp reward. Note: tier 1 towers have 1800 hp, t2 1900hp, t3 2000 hp, t4 2100 hp
     norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 500.
-    if bad_mid_tower and bad_mid_tower_init:
-        norm_bad_tower_hp = (bad_mid_tower.health - bad_mid_tower_init.health) / 500.
-    else:
-        norm_bad_tower_hp = 1800. / 500.
-    reward['tower_hp'] = norm_good_tower_hp - norm_bad_tower_hp
+    # Since we have a zero-sum game we just need to punish our tower losing health to encourage
+    # enemy to hit it and vice-versa
+    reward['tower_hp'] = -1. * norm_good_tower_hp 
 
     return reward
 
