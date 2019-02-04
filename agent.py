@@ -355,7 +355,45 @@ class Player:
         self.rewards = []
 
     @staticmethod
-    def unit_matrix(state, hero_unit, team_id, unit_types, only_self=False, max_units=16):
+    def unit_separation(state, team_id):
+        # Break apart the full unit-list into specific categories for allied and
+        # enemy unit groups of various types so we don't have to repeatedly iterate
+        # the full unit-list again.
+        allied_heroes       = []
+        allied_nonheroes    = []
+        allied_creep        = []
+        allied_towers       = []
+        enemy_heroes        = []
+        enemy_nonheroes     = []
+        enemy_creep         = []
+        enemy_towers        = []
+        for unit in state.units:
+            # check if allied or enemy unit
+            if unit.team_id == team_id:
+                if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
+                    allied_heroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('CREEP_HERO'):
+                    allied_nonheroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
+                    allied_creep.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    allied_towers.append(unit)
+            else:
+                if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
+                    enemy_heroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('CREEP_HERO'):
+                    enemy_nonheroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
+                    enemy_creep.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    enemy_towers.append(unit)
+
+        return allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, \
+               allied_creep, enemy_creep, allied_towers, enemy_towers
+
+
+    @staticmethod
+    def unit_matrix(unit_list, hero_unit, only_self=False, max_units=16):
         # We are always inserting an 'zero' unit to make sure the policy doesn't barf
         # We can't just pad this, because we will otherwise lose track of corresponding chosen
         # actions relating to output indices. Even if we would, batching multiple sequences together
@@ -363,8 +401,8 @@ class Player:
         handles = torch.full([max_units], -1)
         m = torch.zeros(max_units, 8)
         i = 0
-        for unit in state.units:
-            if unit.team_id == team_id and unit.is_alive and unit.unit_type in unit_types:
+        for unit in unit_list:
+            if unit.is_alive:
                 if only_self:
                     if unit != hero_unit:
                         continue
@@ -407,63 +445,44 @@ class Player:
 
         env_state = torch.Tensor([dota_time_norm, creepwave_sin, team_float])
 
-        # Process units
+        # Separate units into unit-type groups for both teams
+        ah, eh, anh, enh, ac, ec, at, et = self.unit_separation(world_state, hero_unit.team_id)
+
+        # Process units into Tensors & Handles
         allied_heroes, allied_hero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=ah,
             hero_unit=hero_unit,
-            unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
-            team_id=hero_unit.team_id,
             only_self=True,  # For now, ignore teammates.
             max_units=1,
         )
 
         enemy_heroes, enemy_hero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=eh,
             hero_unit=hero_unit,
-            unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
-            team_id=OPPOSITE_TEAM[hero_unit.team_id],
             max_units=5,
         )
 
         allied_nonheroes, allied_nonhero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=[*anh, *ac],
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('LANE_CREEP'),
-                CMsgBotWorldState.UnitType.Value('CREEP_HERO')
-            ],
-            team_id=hero_unit.team_id,
             max_units=16,
         )
 
         enemy_nonheroes, enemy_nonhero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=[*enh, *ec],
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('LANE_CREEP'),
-                CMsgBotWorldState.UnitType.Value('CREEP_HERO')
-            ],
-            team_id=OPPOSITE_TEAM[hero_unit.team_id],
             max_units=16,
         )
 
         allied_towers, allied_tower_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=at,
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('TOWER')
-            ],
-            team_id=hero_unit.team_id,
             max_units=11,
         )
 
         enemy_towers, enemy_tower_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=et,
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('TOWER')
-            ],
-            team_id=OPPOSITE_TEAM[hero_unit.team_id],
             max_units=11,
         )
 
