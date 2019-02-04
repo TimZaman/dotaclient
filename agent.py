@@ -141,8 +141,6 @@ def get_reward(prev_obs, obs, player_id):
 
     # Tower hp reward. Note: tier 1 towers have 1800 hp, t2 1900hp, t3 2000 hp, t4 2100 hp
     norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 600.
-    # Since we have a zero-sum game we just need to punish our tower losing health to encourage
-    # enemy to hit it and vice-versa
     reward['tower_hp'] = norm_good_tower_hp 
 
     return reward
@@ -227,8 +225,7 @@ def get_mid_tower(state, team_id):
             and unit.team_id == team_id \
             and 'tower1_mid' in unit.name:
             return unit
-    return None
-    # raise ValueError("tower not found in state:\n{}".format(state))
+    raise ValueError("tower not found in state:\n{}".format(state))
 
 
 def is_unit_attacking_me(unit, me):
@@ -404,6 +401,7 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     enemy_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    print(pformat(unit))
                     if unit.name[-5:] == "1_mid":
                         #print("[%d] Added Enemy Tower: " % unit.team_id, unit.name)
                         enemy_towers.append(unit)
@@ -438,8 +436,22 @@ class Player:
                 distance_x = (hero_unit.location.x - unit.location.x)
                 distance_y = (hero_unit.location.y - unit.location.y)
                 distance = math.sqrt(distance_x**2 + distance_y**2)
+
+                # calculates normalized boolean value [-0.5 or 0.5] of if unit is within 
+                # attack range of hero
                 in_attack_range = float(distance <= hero_unit.attack_range) - 0.5
+
+                # calculates normalized boolean value [-0.5 or 0.5] of if that unit
+                # is currently targeting me with right-click attacks
                 is_attacking_me = float(is_unit_attacking_me(unit, hero_unit)) - 0.5
+
+                # Commenting it out 'facing_sin' and 'facing_cos' since I'm not sure
+                # they add any value. All our attack code will turn to face target when
+                # it needs to anyways so for now it doesn't really matter which way 
+                # we face. Additionally, the facing values represent a very large 
+                # state-space we would have to add into our model as there are 360 
+                # unique values in each parameter.
+
                 # facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)
                 # facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
                 norm_distance = (distance / 7000.) - 0.5
@@ -464,6 +476,9 @@ class Player:
         env_state = torch.Tensor([dota_time_norm, creepwave_sin, team_float])
 
         # Separate units into unit-type groups for both teams
+        # The goal is to iterate only once through the entire unit list
+        # in the provided world-state protobuf and for further filtering
+        # only iterate across the unit-type specific list of interest.
         ah, eh, anh, enh, ac, ec, at, et = self.unit_separation(world_state, hero_unit.team_id)
 
         # Process units into Tensors & Handles
