@@ -401,7 +401,7 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     enemy_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
-                    print(pformat(unit))
+                    # print(pformat(unit))
                     if unit.name[-5:] == "1_mid":
                         #print("[%d] Added Enemy Tower: " % unit.team_id, unit.name)
                         enemy_towers.append(unit)
