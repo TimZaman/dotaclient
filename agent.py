@@ -140,10 +140,10 @@ def get_reward(prev_obs, obs, player_id):
     reward['denies'] = denies * 0.2
 
     # Tower hp reward. Note: tier 1 towers have 1800 hp, t2 1900hp, t3 2000 hp, t4 2100 hp
-    norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 500.
+    norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 600.
     # Since we have a zero-sum game we just need to punish our tower losing health to encourage
     # enemy to hit it and vice-versa
-    reward['tower_hp'] = -1. * norm_good_tower_hp 
+    reward['tower_hp'] = norm_good_tower_hp 
 
     return reward
 
@@ -237,6 +237,13 @@ def is_unit_attacking_me(unit, me):
     elif unit.attack_target_handle == me.handle:
         return 1.
     return 0.
+
+def is_invulnerable(unit):
+    for mod in unit.modifiers:
+        if mod.name == "modifier_invulnerable":
+            #print(unit.name, "is invulnerable")
+            return True
+    return False
 
 class Player:
 
@@ -373,6 +380,10 @@ class Player:
         enemy_creep         = []
         enemy_towers        = []
         for unit in state.units:
+            # FIXME - HACK - remove units that are invulnerable from consideration
+            # This fixes agents trying to attack towers they cannot
+            if is_invulnerable(unit):
+                continue
             # check if allied or enemy unit
             if unit.team_id == team_id:
                 if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
@@ -382,7 +393,9 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     allied_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
-                    allied_towers.append(unit)
+                    if unit.name[-5:] == "1_mid" and float(unit.health / unit.health_max) <= 0.1:
+                        #print("[%d] Added Allied Tower: " % unit.team_id, unit.name)
+                        allied_towers.append(unit)
             else:
                 if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
                     enemy_heroes.append(unit)
@@ -391,7 +404,9 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     enemy_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
-                    enemy_towers.append(unit)
+                    if unit.name[-5:] == "1_mid":
+                        #print("[%d] Added Enemy Tower: " % unit.team_id, unit.name)
+                        enemy_towers.append(unit)
 
         return allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, \
                allied_creep, enemy_creep, allied_towers, enemy_towers
