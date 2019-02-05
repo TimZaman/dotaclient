@@ -12,11 +12,12 @@ logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+eps = np.finfo(np.float32).eps.item()
 
 TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
 
-REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist']
+REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'dist', 'tower_hp']
 
 class Policy(nn.Module):
 
@@ -140,11 +141,11 @@ class Policy(nn.Module):
         return d, value, hidden
 
     @staticmethod
-    def masked_softmax(x, mask, dim=2, epsilon=1e-5):
+    def masked_softmax(x, mask, dim=2):
         exps = torch.exp(x)
         masked_exps = exps * mask.float()
-        masked_sums = masked_exps.sum(dim, keepdim=True) + epsilon
-        return (masked_exps/masked_sums)
+        masked_sums = masked_exps.sum(dim, keepdim=True)
+        return (masked_exps / (masked_sums + eps))
 
     ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16}
 

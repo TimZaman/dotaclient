@@ -126,7 +126,7 @@ def get_reward(prev_obs, obs, player_id):
         reward['hp'] = 0
 
     # Kill and death rewards
-    reward['kills'] = (player.kills - player_init.kills) * 3.0
+    reward['kills'] = (player.kills - player_init.kills) * 2.0
     reward['death'] = (player.deaths - player_init.deaths) * -3.0
 
     # Last-hit reward
@@ -139,10 +139,6 @@ def get_reward(prev_obs, obs, player_id):
 
     # Tower hp reward. Note: towers have 1900 hp.
     reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
-
-    # Microreward for distance to help nudge to mid initially.
-    dist_mid = math.sqrt(unit.location.x**2 + unit.location.y**2)
-    reward['dist'] = -(dist_mid / 8000.) * 0.001
 
     return reward
 
@@ -280,15 +276,14 @@ class Player:
             return
         if end_state in self.END_STATUS_TO_TEAM.keys():
             if self.team_id == self.END_STATUS_TO_TEAM[end_state]:
-                self.rewards[-1]['win'] = 1
+                self.rewards[-1]['win'] = 5
             else:
-                self.rewards[-1]['win'] = -1
+                self.rewards[-1]['win'] = -5
 
     @staticmethod
     def pack_policy_inputs(inputs):
         """Convert the list-of-dicts into a dict with a single tensor per input for the sequence."""
-
-        d = {'env':[], 'allied_heroes':[], 'enemy_heroes':[], 'allied_nonheroes':[], 'enemy_nonheroes':[]}
+        d = { key: [] for key in INPUT_KEYS}
         for inp in inputs:  # go over steps: (list of dicts)
             for k, v in inp.items(): # go over each input in the step (dict)
                 d[k].append(v)
