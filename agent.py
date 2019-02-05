@@ -283,7 +283,7 @@ class Player:
     @staticmethod
     def pack_policy_inputs(inputs):
         """Convert the list-of-dicts into a dict with a single tensor per input for the sequence."""
-        d = { key: [] for key in INPUT_KEYS}
+        d = { key: [] for key in Policy.INPUT_KEYS}
         for inp in inputs:  # go over steps: (list of dicts)
             for k, v in inp.items(): # go over each input in the step (dict)
                 d[k].append(v)
