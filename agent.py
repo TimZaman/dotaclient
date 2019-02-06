@@ -57,7 +57,6 @@ DOTASERVICE_PORT = 13337
 EXPERIENCE_QUEUE_NAME = 'experience'
 MODEL_EXCHANGE_NAME = 'model'
 
-
 # Derivates.
 DELAY_ENUM_TO_STEP = math.floor(TICKS_PER_OBSERVATION / N_DELAY_ENUMS)
 
@@ -448,10 +447,6 @@ class Player:
             if not self.creeps_had_spawned:
                 raise ValueError('Creeps have not spawned at timestep {}'.format(world_state.dota_time))
 
-        # Select valid actions. This mask contains all viable actions.
-        action_masks = Policy.action_masks(unit_handles=unit_handles)
-        logger.debug('action_masks:\n' + pformat(action_masks))
-
         policy_input = dict(
             env=env_state,
             allied_heroes=allied_heroes,
@@ -464,6 +459,10 @@ class Player:
 
         logger.debug('head_logits_dict:\n' + pformat(head_logits_dict))
         logger.debug('value={}'.format(value))
+
+        # Select valid actions. This mask contains all viable actions.
+        action_masks = Policy.action_masks(unit_handles=unit_handles)
+        logger.debug('action_masks:\n' + pformat(action_masks))
 
         # Perform a masked softmax
         head_prob_dict = {}
