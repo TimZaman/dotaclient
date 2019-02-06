@@ -201,17 +201,18 @@ class Policy(nn.Module):
         # TODO(tzaman): Have the sampler kind be user-configurable.
         # Epsilon-greedy is terrible e.g. in cases where the prob is every evenly divided over choices;
         # it will totally offset to one choice (e.g. esp with movement x or y).
-        # if torch.rand(1) < espilon:
-        #     # return torch.randint(probs.size(2), [1, 1])
-        #     probs = (probs > 0).reshape(1, 1, -1).float()
-        #     probs += 1e-7  # Add eps to avoid pytorch negative issue.
-        #     return Categorical(probs).sample()
-        # else:
-        #     # Greedy
-        #     return torch.argmax(probs, dim=2)
+
+        # Below is episilon-random-uniform-stocastic
+        if torch.rand(1) < espilon:
+            probs = (probs > 0).reshape(1, 1, -1).float()  # Makes it into a binary array
+            probs += eps  # Add eps to avoid pytorch negative issue.
+            return Categorical(probs).sample()
+        else:
+            # return torch.argmax(probs, dim=2)  # Greedy
+            return Categorical(probs).sample()
         
-        # Stochastic
-        return Categorical(probs).sample()
+        # Purely stochastic
+        # return Categorical(probs).sample()
 
     @classmethod
     def select_actions(cls, head_prob_dict):
