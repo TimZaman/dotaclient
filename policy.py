@@ -28,6 +28,8 @@ class Policy(nn.Module):
     MOVE_ENUMS = np.arange(N_MOVE_ENUMS, dtype=np.float32) - int(N_MOVE_ENUMS / 2)
     MOVE_ENUMS *= MAX_MOVE_IN_OBS / (N_MOVE_ENUMS - 1) * 2
     OBSERVATIONS_PER_SECOND = TICKS_PER_SECOND / TICKS_PER_OBSERVATION
+    MAX_UNITS = 1+5+16+16+1+1
+    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': MAX_UNITS}
 
     def __init__(self):
         super().__init__()
@@ -74,15 +76,6 @@ class Policy(nn.Module):
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes,
                 allied_towers, enemy_towers, hidden):
         """Input as batch."""
-        logger.debug('policy(inputs=\n{}'.format(
-            pformat({'env': env,
-            'allied_heroes': allied_heroes,
-            'enemy_heroes': enemy_heroes,
-            'allied_nonheroes': allied_nonheroes,
-            'enemy_nonheroes': enemy_nonheroes,
-            'allied_towers': allied_towers,
-            'enemy_towers': enemy_towers,
-            })))
 
         # Environment.
         env = F.relu(self.affine_env(env))  # (b, s, n)
@@ -158,15 +151,13 @@ class Policy(nn.Module):
         # Return
         return d, value, hidden
 
-    @staticmethod
-    def masked_softmax(x, mask, dim=2):
+    @classmethod
+    def masked_softmax(cls, x, mask, dim=2):
         exps = torch.exp(x)
         masked_exps = exps * mask.float()
         masked_sums = masked_exps.sum(dim, keepdim=True)
         # Eps here is very small bc nonmasked targets might have very small probabilities.
         return (masked_exps / (masked_sums + 1e-13))
-
-    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16+11+11}
 
     @classmethod
     def flatten_selections(cls, inputs):
@@ -210,10 +201,7 @@ class Policy(nn.Module):
 
         target_unit = inputs[:, 3+9+9:]
         target_unith = target_unit.any(dim=1, keepdim=True)
-        # num units is 1 (allied heroes - self only) + 5 enemy units
-        # + 16 allied creep, +16 enemy creep, +11 allied towers
-        # + 11 enemy towers
-        target_unith = target_unith.repeat(1, 60)  # 1+5+16+16+11+11
+        target_unith = target_unith.repeat(1, cls.MAX_UNITS)
 
         # Put it back together
         return torch.cat([enumh, xh, yh, target_unith], dim=1)

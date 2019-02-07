@@ -226,16 +226,19 @@ def get_mid_tower(state, team_id):
 
 
 def is_unit_attacking_unit(unit_attacker, unit_target):
-    if not unit_attacker.attack_target_handle:
-        return 0.
-    elif unit_attacker.attack_target_handle == unit_target.handle:
+    # Check for a direct attack.
+    if unit_attacker.attack_target_handle == unit_target.handle:
         return 1.
+    # Go over the incoming projectiles from this unit.
+    for projectile in unit_target.incoming_tracking_projectiles:
+        if projectile.caster_handle == unit_attacker.handle and projectile.is_attack:
+            return 1.
+    # Otherwise, the unit is not attacking the target, and there are no incoming projectiles.
     return 0.
 
 def is_invulnerable(unit):
     for mod in unit.modifiers:
         if mod.name == "modifier_invulnerable":
-            #print(unit.name, "is invulnerable")
             return True
     return False
 
@@ -393,7 +396,6 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     enemy_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
-                    # print(pformat(unit))
                     if unit.name[-5:] == "1_mid":  # Only consider the mid tower for now.
                         enemy_towers.append(unit)
 
@@ -497,13 +499,13 @@ class Player:
         allied_towers, allied_tower_handles = self.unit_matrix(
             unit_list=at,
             hero_unit=hero_unit,
-            max_units=11,
+            max_units=1,
         )
 
         enemy_towers, enemy_tower_handles = self.unit_matrix(
             unit_list=et,
             hero_unit=hero_unit,
-            max_units=11,
+            max_units=1,
         )
 
         unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles,
@@ -516,15 +518,17 @@ class Player:
             if not self.creeps_had_spawned:
                 raise ValueError('Creeps have not spawned at timestep {}'.format(world_state.dota_time))
 
-        policy_input = dict(
-            env=env_state,
-            allied_heroes=allied_heroes,
-            enemy_heroes=enemy_heroes,
-            allied_nonheroes=allied_nonheroes,
-            enemy_nonheroes=enemy_nonheroes,
-            allied_towers=allied_towers,
-            enemy_towers=enemy_towers,
-        )
+        policy_input = {
+            'env': env_state,
+            'allied_heroes': allied_heroes,
+            'enemy_heroes': enemy_heroes,
+            'allied_nonheroes': allied_nonheroes,
+            'enemy_nonheroes': enemy_nonheroes,
+            'allied_towers': allied_towers,
+            'enemy_towers': enemy_towers,
+        }
+
+        logger.debug('policy_input:\n' + pformat(policy_input))
 
         head_logits_dict, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
 
@@ -691,7 +695,7 @@ class Game:
         end_state = None
         while dota_time < self.max_dota_time:
             for team_id, player in players.items():  # TODO(tzaman): actually, should loop over teams first instead of players.
-                logger.debug('dota_time={:.2f}, team={}'.format(dota_time, team_id))
+                logger.debug('\ndota_time={:.2f}, team={}'.format(dota_time, team_id))
                 player = players[team_id]
 
                 response = await self.dota_service.observe(ObserveConfig(team_id=team_id))
