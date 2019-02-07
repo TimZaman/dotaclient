@@ -34,7 +34,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats = nn.Linear(7, 128)
+        self.affine_unit_basic_stats = nn.Linear(10, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -43,18 +43,18 @@ class Policy(nn.Module):
         self.affine_unit_ath = nn.Linear(128, 128)
         self.affine_unit_eth = nn.Linear(128, 128)
 
-        self.affine_pre_rnn = nn.Linear(896, 128)
-        self.rnn = nn.LSTM(input_size=128, hidden_size=128, num_layers=1, batch_first=True)
+        self.affine_pre_rnn = nn.Linear(896, 256)
+        self.rnn = nn.LSTM(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
 
         # self.ln = nn.LayerNorm(128)
 
         # Heads
-        self.affine_head_enum = nn.Linear(128, 3)
-        self.affine_move_x = nn.Linear(128, self.N_MOVE_ENUMS)
-        self.affine_move_y = nn.Linear(128, self.N_MOVE_ENUMS)
+        self.affine_head_enum = nn.Linear(256, 3)
+        self.affine_move_x = nn.Linear(256, self.N_MOVE_ENUMS)
+        self.affine_move_y = nn.Linear(256, self.N_MOVE_ENUMS)
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
-        self.affine_unit_attention = nn.Linear(128, 128)
-        self.affine_value = nn.Linear(128, 1)
+        self.affine_unit_attention = nn.Linear(256, 128)
+        self.affine_value = nn.Linear(256, 1)
 
     def single(self, hidden, **kwargs):
         """Inputs a single element of a sequence."""

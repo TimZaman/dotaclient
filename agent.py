@@ -47,6 +47,7 @@ N_DELAY_ENUMS = 5
 HOST_TIMESCALE = 10
 N_GAMES = 10000000
 MAX_AGE_WEIGHTSTORE = 32
+MAP_HALF_WIDTH = 7000.  # Approximate size of the half of the map.
 
 HOST_MODE = HostMode.Value('HOST_MODE_DEDICATED')
 
@@ -224,10 +225,10 @@ def get_mid_tower(state, team_id):
     raise ValueError("tower not found in state:\n{}".format(state))
 
 
-def is_unit_attacking_me(unit, me):
-    if not unit.attack_target_handle:
+def is_unit_attacking_unit(unit_attacker, unit_target):
+    if not unit_attacker.attack_target_handle:
         return 0.
-    elif unit.attack_target_handle == me.handle:
+    elif unit_attacker.attack_target_handle == unit_target.handle:
         return 1.
     return 0.
 
@@ -407,7 +408,7 @@ class Player:
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
         handles = torch.full([max_units], -1)
-        m = torch.zeros(max_units, 7)
+        m = torch.zeros(max_units, 10)
         i = 0
         for unit in unit_list:
             if unit.is_alive:
@@ -420,36 +421,32 @@ class Player:
                 rel_mana = 0.0
                 if unit.mana_max > 0:
                     rel_mana = 1.0 - (unit.mana / unit.mana_max)
-                loc_x = unit.location.x / 7000.
-                loc_y = unit.location.y / 7000.
+                loc_x = unit.location.x / MAP_HALF_WIDTH
+                loc_y = unit.location.y / MAP_HALF_WIDTH
                 loc_z = (unit.location.z / 512.)-0.5
                 distance_x = (hero_unit.location.x - unit.location.x)
                 distance_y = (hero_unit.location.y - unit.location.y)
                 distance = math.sqrt(distance_x**2 + distance_y**2)
+                norm_distance = (distance / MAP_HALF_WIDTH) - 0.5
 
-                # calculates normalized boolean value [-0.5 or 0.5] of if unit is within 
-                # attack range of hero
+                # Get the direction where the unit is facing.
+                facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)	
+                facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
+
+                # Calculates normalized boolean value [-0.5 or 0.5] of if unit is within 
+                # attack range of hero.
                 in_attack_range = float(distance <= hero_unit.attack_range) - 0.5
 
-                # calculates normalized boolean value [-0.5 or 0.5] of if that unit
-                # is currently targeting me with right-click attacks
-                is_attacking_me = float(is_unit_attacking_me(unit, hero_unit)) - 0.5
+                # Calculates normalized boolean value [-0.5 or 0.5] of if that unit
+                # is currently targeting me with right-click attacks.
+                is_attacking_me = float(is_unit_attacking_unit(unit, hero_unit)) - 0.5
+                me_attacking_unit = float(is_unit_attacking_unit(hero_unit, unit)) - 0.5
 
-                # Commenting it out 'facing_sin' and 'facing_cos' since I'm not sure
-                # they add any value. All our attack code will turn to face target when
-                # it needs to anyways so for now it doesn't really matter which way 
-                # we face. Additionally, the facing values represent a very large 
-                # state-space we would have to add into our model as there are 360 
-                # unique values in each parameter.
-
-                # facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)
-                # facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
-                norm_distance = (distance / 7000.) - 0.5
                 m[i] = (
                     # TODO(tzaman): Add rel_mana, norm_distance once it makes sense
                     torch.tensor([
-                        rel_hp, loc_x, loc_y, loc_z, norm_distance, #facing_sin, facing_cos,
-                        in_attack_range, is_attacking_me,
+                        rel_hp, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
+                        in_attack_range, is_attacking_me, me_attacking_unit
                     ]))
                 handles[i] = unit.handle
                 i += 1
