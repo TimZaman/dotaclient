@@ -105,10 +105,8 @@ def get_reward(prev_obs, obs, player_id):
     player_init = get_player(prev_obs, player_id=player_id)
     player = get_player(obs, player_id=player_id)
 
-    good_mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
-    good_mid_tower = get_mid_tower(obs, team_id=player.team_id)
-    #bad_mid_tower_init = get_mid_tower(prev_obs, team_id=OPPOSITE_TEAM[player.team_id])
-    #bad_mid_tower = get_mid_tower(obs, team_id=OPPOSITE_TEAM[player.team_id])
+    mid_tower_init = get_mid_tower(prev_obs, team_id=player.team_id)
+    mid_tower = get_mid_tower(obs, team_id=player.team_id)
 
     # TODO(tzaman): make a nice reward container?
     reward = {key: 0. for key in REWARD_KEYS}
@@ -139,9 +137,8 @@ def get_reward(prev_obs, obs, player_id):
     denies = unit.denies - unit_init.denies
     reward['denies'] = denies * 0.2
 
-    # Tower hp reward. Note: tier 1 towers have 1800 hp, t2 1900hp, t3 2000 hp, t4 2100 hp
-    norm_good_tower_hp = (good_mid_tower.health - good_mid_tower_init.health) / 600.
-    reward['tower_hp'] = norm_good_tower_hp 
+    # Tower hp reward. Note: towers have 1900 hp.
+    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 500.
 
     return reward
 
