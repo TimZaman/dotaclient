@@ -224,6 +224,20 @@ def get_mid_tower(state, team_id):
     raise ValueError("tower not found in state:\n{}".format(state))
 
 
+def is_unit_attacking_me(unit, me):
+    if not unit.attack_target_handle:
+        return 0.
+    elif unit.attack_target_handle == me.handle:
+        return 1.
+    return 0.
+
+def is_invulnerable(unit):
+    for mod in unit.modifiers:
+        if mod.name == "modifier_invulnerable":
+            #print(unit.name, "is invulnerable")
+            return True
+    return False
+
 class Player:
 
     END_STATUS_TO_TEAM = {
@@ -346,16 +360,63 @@ class Player:
         self.rewards = []
 
     @staticmethod
-    def unit_matrix(state, hero_unit, team_id, unit_types, only_self=False, max_units=16):
+    def unit_separation(state, team_id):
+        # Break apart the full unit-list into specific categories for allied and
+        # enemy unit groups of various types so we don't have to repeatedly iterate
+        # the full unit-list again.
+        allied_heroes       = []
+        allied_nonheroes    = []
+        allied_creep        = []
+        allied_towers       = []
+        enemy_heroes        = []
+        enemy_nonheroes     = []
+        enemy_creep         = []
+        enemy_towers        = []
+        for unit in state.units:
+            # FIXME - HACK - remove units that are invulnerable from consideration
+            # This fixes agents trying to attack towers they cannot
+            if is_invulnerable(unit):
+                continue
+            # check if allied or enemy unit
+            if unit.team_id == team_id:
+                if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
+                    allied_heroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('CREEP_HERO'):
+                    allied_nonheroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
+                    allied_creep.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    if unit.name[-5:] == "1_mid" and float(unit.health / unit.health_max) <= 0.1:
+                        #print("[%d] Added Allied Tower: " % unit.team_id, unit.name)
+                        allied_towers.append(unit)
+            else:
+                if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
+                    enemy_heroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('CREEP_HERO'):
+                    enemy_nonheroes.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
+                    enemy_creep.append(unit)
+                elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    # print(pformat(unit))
+                    if unit.name[-5:] == "1_mid":
+                        #print("[%d] Added Enemy Tower: " % unit.team_id, unit.name)
+                        enemy_towers.append(unit)
+
+        return allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, \
+               allied_creep, enemy_creep, allied_towers, enemy_towers
+
+
+    @staticmethod
+    def unit_matrix(unit_list, hero_unit, only_self=False, max_units=16):
         # We are always inserting an 'zero' unit to make sure the policy doesn't barf
         # We can't just pad this, because we will otherwise lose track of corresponding chosen
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
         handles = torch.full([max_units], -1)
-        m = torch.zeros(max_units, 8)
+        m = torch.zeros(max_units, 7)
         i = 0
-        for unit in state.units:
-            if unit.team_id == team_id and unit.is_alive and unit.unit_type in unit_types:
+        for unit in unit_list:
+            if unit.is_alive:
                 if only_self:
                     if unit != hero_unit:
                         continue
@@ -371,18 +432,30 @@ class Player:
                 distance_x = (hero_unit.location.x - unit.location.x)
                 distance_y = (hero_unit.location.y - unit.location.y)
                 distance = math.sqrt(distance_x**2 + distance_y**2)
-                facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)
-                facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
+
+                # calculates normalized boolean value [-0.5 or 0.5] of if unit is within 
+                # attack range of hero
                 in_attack_range = float(distance <= hero_unit.attack_range) - 0.5
-                distance = (distance / 7000.) - 0.5
-                # TODO(tzaman): use distance x,y
-                # distance_x = (distance_x / 3000)-0.5.
-                # distance_y = (distance_y / 3000)-0.5.
-                # TODO(tzaman): Add rel mana once it makes sense
+
+                # calculates normalized boolean value [-0.5 or 0.5] of if that unit
+                # is currently targeting me with right-click attacks
+                is_attacking_me = float(is_unit_attacking_me(unit, hero_unit)) - 0.5
+
+                # Commenting it out 'facing_sin' and 'facing_cos' since I'm not sure
+                # they add any value. All our attack code will turn to face target when
+                # it needs to anyways so for now it doesn't really matter which way 
+                # we face. Additionally, the facing values represent a very large 
+                # state-space we would have to add into our model as there are 360 
+                # unique values in each parameter.
+
+                # facing_sin = math.sin(unit.facing * (2 * math.pi) / 360)
+                # facing_cos = math.cos(unit.facing * (2 * math.pi) / 360)
+                norm_distance = (distance / 7000.) - 0.5
                 m[i] = (
+                    # TODO(tzaman): Add rel_mana, norm_distance once it makes sense
                     torch.tensor([
-                        rel_hp, loc_x, loc_y, loc_z, distance, facing_sin, facing_cos,
-                        in_attack_range,
+                        rel_hp, loc_x, loc_y, loc_z, norm_distance, #facing_sin, facing_cos,
+                        in_attack_range, is_attacking_me,
                     ]))
                 handles[i] = unit.handle
                 i += 1
@@ -398,47 +471,52 @@ class Player:
 
         env_state = torch.Tensor([dota_time_norm, creepwave_sin, team_float])
 
-        # Process units
+        # Separate units into unit-type groups for both teams
+        # The goal is to iterate only once through the entire unit list
+        # in the provided world-state protobuf and for further filtering
+        # only iterate across the unit-type specific list of interest.
+        ah, eh, anh, enh, ac, ec, at, et = self.unit_separation(world_state, hero_unit.team_id)
+
+        # Process units into Tensors & Handles
         allied_heroes, allied_hero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=ah,
             hero_unit=hero_unit,
-            unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
-            team_id=hero_unit.team_id,
             only_self=True,  # For now, ignore teammates.
             max_units=1,
         )
 
         enemy_heroes, enemy_hero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=eh,
             hero_unit=hero_unit,
-            unit_types=[CMsgBotWorldState.UnitType.Value('HERO')],
-            team_id=OPPOSITE_TEAM[hero_unit.team_id],
             max_units=5,
         )
 
         allied_nonheroes, allied_nonhero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=[*anh, *ac],
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('LANE_CREEP'),
-                CMsgBotWorldState.UnitType.Value('CREEP_HERO')
-            ],
-            team_id=hero_unit.team_id,
             max_units=16,
         )
 
         enemy_nonheroes, enemy_nonhero_handles = self.unit_matrix(
-            state=world_state,
+            unit_list=[*enh, *ec],
             hero_unit=hero_unit,
-            unit_types=[
-                CMsgBotWorldState.UnitType.Value('LANE_CREEP'),
-                CMsgBotWorldState.UnitType.Value('CREEP_HERO')
-            ],
-            team_id=OPPOSITE_TEAM[hero_unit.team_id],
             max_units=16,
         )
 
-        unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles])
+        allied_towers, allied_tower_handles = self.unit_matrix(
+            unit_list=at,
+            hero_unit=hero_unit,
+            max_units=11,
+        )
+
+        enemy_towers, enemy_tower_handles = self.unit_matrix(
+            unit_list=et,
+            hero_unit=hero_unit,
+            max_units=11,
+        )
+
+        unit_handles = torch.cat([allied_hero_handles, enemy_hero_handles, allied_nonhero_handles, enemy_nonhero_handles,
+                                  allied_tower_handles, enemy_tower_handles])
 
         if not self.creeps_had_spawned and world_state.dota_time > 0.:
             # Check that creeps have spawned. See dotaclient/issues/15.
@@ -453,6 +531,8 @@ class Player:
             enemy_heroes=enemy_heroes,
             allied_nonheroes=allied_nonheroes,
             enemy_nonheroes=enemy_nonheroes,
+            allied_towers=allied_towers,
+            enemy_towers=enemy_towers,
         )
 
         head_logits_dict, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
