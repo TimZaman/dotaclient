@@ -163,7 +163,8 @@ class Policy(nn.Module):
         exps = torch.exp(x)
         masked_exps = exps * mask.float()
         masked_sums = masked_exps.sum(dim, keepdim=True)
-        return (masked_exps / (masked_sums + eps))
+        # Eps here is very small bc nonmasked targets might have very small probabilities.
+        return (masked_exps / (masked_sums + 1e-13))
 
     ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': 1+5+16+16+11+11}
 
