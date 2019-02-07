@@ -365,18 +365,14 @@ class Player:
         # enemy unit groups of various types so we don't have to repeatedly iterate
         # the full unit-list again.
         allied_heroes       = []
-        allied_nonheroes    = []
-        allied_creep        = []
-        allied_towers       = []
         enemy_heroes        = []
+        allied_nonheroes    = []
         enemy_nonheroes     = []
+        allied_creep        = []
         enemy_creep         = []
+        allied_towers       = []
         enemy_towers        = []
         for unit in state.units:
-            # FIXME - HACK - remove units that are invulnerable from consideration
-            # This fixes agents trying to attack towers they cannot
-            if is_invulnerable(unit):
-                continue
             # check if allied or enemy unit
             if unit.team_id == team_id:
                 if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
@@ -386,8 +382,7 @@ class Player:
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('LANE_CREEP'):
                     allied_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
-                    if unit.name[-5:] == "1_mid" and float(unit.health / unit.health_max) <= 0.1:
-                        #print("[%d] Added Allied Tower: " % unit.team_id, unit.name)
+                    if unit.name[-5:] == "1_mid":  # Only consider the mid tower for now.
                         allied_towers.append(unit)
             else:
                 if unit.unit_type == CMsgBotWorldState.UnitType.Value('HERO'):
@@ -398,8 +393,7 @@ class Player:
                     enemy_creep.append(unit)
                 elif unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
                     # print(pformat(unit))
-                    if unit.name[-5:] == "1_mid":
-                        #print("[%d] Added Enemy Tower: " % unit.team_id, unit.name)
+                    if unit.name[-5:] == "1_mid":  # Only consider the mid tower for now.
                         enemy_towers.append(unit)
 
         return allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes, \
