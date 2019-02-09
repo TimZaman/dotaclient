@@ -450,7 +450,20 @@ class Player:
                         rel_hp, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
                         in_attack_range, is_attacking_me, me_attacking_unit
                     ]))
-                handles[i] = unit.handle
+
+                # Because we are currently only attacking, check if these units are valid
+                # HACK: Make a nice interface for this, per enum used?
+                if unit.is_invulnerable or unit.is_attack_immune:
+                    handles[i] = -1
+                elif unit.team_id == hero_unit.team_id and unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
+                    # Its own tower:
+                    handles[i] = -1
+                elif unit.team_id == hero_unit.team_id and (unit.health / unit.health_max) > 0.5:
+                    # Not denyable
+                    handles[i] = -1
+                else:
+                    handles[i] = unit.handle
+
                 i += 1
         return m, handles
 
@@ -513,8 +526,9 @@ class Player:
 
         if not self.creeps_had_spawned and world_state.dota_time > 0.:
             # Check that creeps have spawned. See dotaclient/issues/15.
-            # TODO(tzaman): should this be handled by DotaService?
-            self.creeps_had_spawned = bool((allied_nonhero_handles != -1).any())
+            # TODO(tzaman): this should be handled by DotaService.
+            # self.creeps_had_spawned = bool((allied_nonhero_handles != -1).any())
+            self.creeps_had_spawned = len(ac) > 0
             if not self.creeps_had_spawned:
                 raise ValueError('Creeps have not spawned at timestep {}'.format(world_state.dota_time))
 
