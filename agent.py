@@ -273,6 +273,7 @@ class Player:
         self.policy = Policy()
         self.policy.load_state_dict(state_dict, strict=False)  # TODO(tzaman): HACK: should be true
         self.policy.weight_version = version
+        self.policy.eval()  # Set to evaluation mode.
 
         logger.info('Player {} using weights version {}'.format(
             self.player_id, self.policy.weight_version))
@@ -722,7 +723,8 @@ class Game:
 
                 player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
 
-                action_pb = player.obs_to_action(obs=obs)
+                with torch.no_grad():
+                    action_pb = player.obs_to_action(obs=obs)
                 actions_pb = CMsgBotWorldState.Actions(actions=[action_pb])
                 actions_pb.dota_time = obs.dota_time
 

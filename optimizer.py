@@ -416,8 +416,9 @@ class DotaOptimizer:
                 # logger.debug(' adding experience @{}/{}'.format(len(experiences), self.seq_per_epoch))
 
                 # Get new experiences from a new rollout.
-                rollout, rollout_subrewards, rollout_len, weight_version, canvas = self.get_rollout()
-                rollout_experiences = self.experiences_from_rollout(data=rollout)
+                with torch.no_grad():
+                    rollout, rollout_subrewards, rollout_len, weight_version, canvas = self.get_rollout()
+                    rollout_experiences = self.experiences_from_rollout(data=rollout)
 
                 experiences.extend(rollout_experiences)
 
