@@ -147,14 +147,23 @@ class WeightStore:
         self.ready = None  # HACK: Will be set to an event
         self.weights = deque(maxlen=maxlen)
 
+        # The latest policy is used as a pointer to the latest and greatest policy. It is updated
+        # even while the agents are playing.
+        self.latest_policy = Policy()
+        self.latest_policy.eval()
+
     def add(self, version, state_dict):
         # TODO(tzaman): delete old ones
         self.weights.append( (version, state_dict) )
 
-    def oldest_model(self):
+        # Add to latest policy immediatelly
+        self.latest_policy.load_state_dict(state_dict, strict=True)
+        self.latest_policy.weight_version = version
+
+    def oldest_weights(self):
         return self.weights[0]
 
-    def latest_model(self):
+    def latest_weights(self):
         return self.weights[-1]
 
     def load_from_gcs(self, model):
@@ -247,12 +256,12 @@ class Player:
         Status.Value('DIRE_WIN'): TEAM_DIRE,
     }
 
-    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_model, drawing):
+    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_weights, drawing):
         self.game_id = game_id
         self.player_id = player_id
         self.team_id = team_id
         self.experience_channel = experience_channel
-        self.use_latest_model= use_latest_model
+        self.use_latest_weights= use_latest_weights
 
         self.policy_inputs = []
         self.vec_actions = []
@@ -263,15 +272,15 @@ class Player:
 
         self.creeps_had_spawned = False
 
-        if use_latest_model:
-            version, state_dict = weight_store.latest_model()
+        if use_latest_weights:
+            # This will actually use the latest policy, that is even updated while the agent is playing.
+            self.policy = weight_store.latest_policy
         else:
-            version, state_dict = weight_store.oldest_model()
-
-        self.policy = Policy()
-        self.policy.load_state_dict(state_dict, strict=False)  # TODO(tzaman): HACK: should be true
-        self.policy.weight_version = version
-        self.policy.eval()  # Set to evaluation mode.
+            version, state_dict = weight_store.oldest_weights()
+            self.policy = Policy()
+            self.policy.load_state_dict(state_dict, strict=True)
+            self.policy.weight_version = version
+            self.policy.eval()  # Set to evaluation mode.
 
         logger.info('Player {} using weights version {}'.format(
             self.player_id, self.policy.weight_version))
@@ -657,21 +666,21 @@ class Game:
     ENV_RETRY_DELAY = 15
 
     def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time,
-                 latest_model_prob):
+                 latest_weights_prob):
         self.config = config
         self.dota_service = dota_service
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
         self.max_dota_time = max_dota_time
-        self.latest_model_prob = latest_model_prob
+        self.latest_weights_prob = latest_weights_prob
 
     async def play(self, game_id):
         logger.info('Starting game.')
 
-        use_latest_model = {TEAM_RADIANT: True, TEAM_DIRE: True}
-        if random.random() > self.latest_model_prob:
+        use_latest_weights = {TEAM_RADIANT: True, TEAM_DIRE: True}
+        if random.random() > self.latest_weights_prob:
             old_model_team = random.choice([TEAM_RADIANT, TEAM_DIRE])
-            use_latest_model[old_model_team] = False
+            use_latest_weights[old_model_team] = False
 
         drawing = Drawing()  # TODO(tzaman): drawing should include include what's visible to the player
 
@@ -682,7 +691,7 @@ class Game:
                 player_id=0,
                 team_id=TEAM_RADIANT,
                 experience_channel=self.experience_channel,
-                use_latest_model=use_latest_model[TEAM_RADIANT],
+                use_latest_weights=use_latest_weights[TEAM_RADIANT],
                 drawing=drawing,
                 ),
             TEAM_DIRE:
@@ -691,7 +700,7 @@ class Game:
                 player_id=5,
                 team_id=TEAM_DIRE,
                 experience_channel=self.experience_channel,
-                use_latest_model=use_latest_model[TEAM_DIRE],
+                use_latest_weights=use_latest_weights[TEAM_DIRE],
                 drawing=drawing,
                 ),
         }
@@ -761,7 +770,7 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_prob, initial_model):
+async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_prob, initial_model):
     logger.info('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
@@ -793,7 +802,7 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_model_pro
 
     game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel,
                 rollout_size=rollout_size, max_dota_time=max_dota_time,
-                latest_model_prob=latest_model_prob)
+                latest_weights_prob=latest_weights_prob)
 
     for i in range(0, N_GAMES):
         logger.info('=== Starting Game {}.'.format(i))
@@ -816,14 +825,14 @@ if __name__ == '__main__':
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
     parser.add_argument("--model", type=str, help="Initial model to immediatelly start")
-    parser.add_argument("--use-latest-model-prob", type=float,
-                        help="Probability of using the latest model. Otherwise some old one is chosen if available.", default=1.0)
+    parser.add_argument("--use-latest-weights-prob", type=float,
+                        help="Probability of using the latest weights. Otherwise some old one is chosen if available.", default=1.0)
     args = parser.parse_args()
 
     logger.setLevel(args.log_level)
 
     loop = asyncio.get_event_loop()
     coro = main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
-                max_dota_time=args.max_dota_time, latest_model_prob=args.use_latest_model_prob,
+                max_dota_time=args.max_dota_time, latest_weights_prob=args.use_latest_weights_prob,
                 initial_model=args.model)
     loop.run_until_complete(coro)
