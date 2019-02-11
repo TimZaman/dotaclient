@@ -439,16 +439,16 @@ class DotaOptimizer:
                 # Divide into batches
                 batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
                 for batch in batches:
-                    loss, entropy_d, advantage = self.train(experiences=batch)
-                    losses.append(loss)
+                    loss_d, entropy_d, advantage = self.train(experiences=batch)
+                    losses.append(loss_d)
                     entropies.append(entropy_d)
                     advantages.append(advantage)
             
             # Set the new policy as the old one.
             self.policy_old.load_state_dict(self.policy.state_dict())
 
-            losses = torch.stack(losses)
-            loss = losses.mean()
+            losses = self.list_of_dicts_to_dict_of_lists(losses)
+            loss = losses['loss'].mean()
 
             advantages = torch.stack(advantages)
             advantage = advantages.mean()
@@ -474,7 +474,10 @@ class DotaOptimizer:
             metrics = {
                 self.SPEED_KEY: steps_per_s,
                 'reward_per_sec/sum': reward_per_sec,
-                'loss': loss,
+                'loss/sum': loss,
+                'loss/policy': losses['policy_loss'].mean(),
+                'loss/entropy': losses['entropy_loss'].mean(),
+                'loss/advantage': losses['advantage_loss'].mean(),
                 'entropy': entropy,
                 'advantage': advantage,
                 'avg_rollout_len': avg_rollout_len,
@@ -498,7 +501,7 @@ class DotaOptimizer:
                     self.writer.add_scalar(name, metric, it)
                 
                 # Add per-iteration histograms
-                self.writer.add_histogram('losses', losses, it)
+                self.writer.add_histogram('losses', losses['loss'], it)
                 # self.writer.add_histogram('entropies', entropies, it)
                 self.writer.add_histogram('rollout_lens', rollout_lens, it)
                 self.writer.add_histogram('weight_age', weight_ages, it)
@@ -611,9 +614,9 @@ class DotaOptimizer:
             entropies[key] = -e.mean()
 
         entropy = torch.stack(list(entropies.values())).sum()
-        entropy_loss = self.entropy_coef * entropy
+        entropy_loss = -self.entropy_coef * entropy
         advantage_loss = self.vf_coef * (advantage.pow(2)).mean()
-        loss = policy_loss - entropy_loss + advantage_loss
+        loss = policy_loss + entropy_loss + advantage_loss
 
         if torch.isnan(loss):
             raise ValueError('loss={}, policy_loss={}, entropy_loss={}, advantage_loss={}'.format(
@@ -623,7 +626,13 @@ class DotaOptimizer:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
         self.optimizer.step()
-        return loss, entropies, advantage.mean()
+        losses = {
+            'loss': loss,
+            'policy_loss': policy_loss,
+            'entropy_loss': entropy_loss,
+            'advantage_loss': advantage_loss,
+        }
+        return losses, entropies, advantage.mean()
 
 
     def upload_model(self, version):
