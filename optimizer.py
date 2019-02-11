@@ -212,7 +212,7 @@ class DotaOptimizer:
 
     def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
                  learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir,
-                 entropy_coef, run_local):
+                 entropy_coef, vf_coef, run_local):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
@@ -228,7 +228,7 @@ class DotaOptimizer:
         self.exp_dir = exp_dir
         self.job_dir = job_dir
         self.entropy_coef = entropy_coef
-        self.vf_coef = 0.5
+        self.vf_coef = vf_coef
 
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
@@ -674,11 +674,11 @@ def init_distribution(backend='gloo'):
 
 
 def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
-         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef, run_local):
+         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef, vf_coef, run_local):
     logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
-                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={})'.format(
+                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={}, vf_coef={})'.format(
         rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
-        entropy_coef))
+        entropy_coef, vf_coef))
 
     # If applicable, initialize distributed training.
     if torch.distributed.is_available():
@@ -703,6 +703,7 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         exp_dir=exp_dir,
         job_dir=job_dir,
         entropy_coef=entropy_coef,
+        vf_coef=vf_coef,
         run_local=run_local,
     )
 
@@ -728,6 +729,7 @@ if __name__ == '__main__':
     parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
     parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
     parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.01)
+    parser.add_argument("--vf-coef", type=float, help="value fn coef (as proportional addition to the loss)", default=0.5)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
                         help="amount of experience messages to prefetch from mq", default=4)
@@ -753,6 +755,7 @@ if __name__ == '__main__':
             exp_dir=args.exp_dir,
             job_dir=args.job_dir,
             entropy_coef=args.entropy_coef,
+            vf_coef=args.vf_coef,
             run_local=args.run_local,
         )
     except KeyboardInterrupt:
