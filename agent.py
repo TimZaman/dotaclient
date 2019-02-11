@@ -114,31 +114,29 @@ def get_reward(prev_obs, obs, player_id):
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
     xp = get_total_xp(level=unit.level, xp_needed_to_level=unit.xp_needed_to_level)
-    reward['xp'] = (xp - xp_init) * 0.002  # One creep is around 40 xp.
+    reward['xp'] = (xp - xp_init) * 0.0002  # One creep is around 40 xp.
 
     # HP and death reward
     if unit_init.is_alive and unit.is_alive:
         hp_rel_init = unit_init.health / unit_init.health_max
         hp_rel = unit.health / unit.health_max
         low_hp_factor = 1. + (1 - hp_rel)**2  # hp_rel=0 -> 2; hp_rel=0.5->1.25; hp_rel=1 -> 1.
-        reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor
-    else:
-        reward['hp'] = 0
+        reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor * 0.2
 
     # Kill and death rewards
-    reward['kills'] = (player.kills - player_init.kills) * 5.0
-    reward['death'] = (player.deaths - player_init.deaths) * -5.0
+    reward['kills'] = (player.kills - player_init.kills) * 0.5
+    reward['death'] = (player.deaths - player_init.deaths) * -0.5
 
     # Last-hit reward
     lh = unit.last_hits - unit_init.last_hits
-    reward['lh'] = lh * 0.5
+    reward['lh'] = lh * 0.05
 
     # Deny reward
     denies = unit.denies - unit_init.denies
-    reward['denies'] = denies * 0.2
+    reward['denies'] = denies * 0.02
 
     # Tower hp reward. Note: towers have 1900 hp.
-    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 250.
+    reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 1900.
 
     return reward
 
@@ -294,9 +292,9 @@ class Player:
             return
         if end_state in self.END_STATUS_TO_TEAM.keys():
             if self.team_id == self.END_STATUS_TO_TEAM[end_state]:
-                self.rewards[-1]['win'] = 10
+                self.rewards[-1]['win'] = 1
             else:
-                self.rewards[-1]['win'] = -10
+                self.rewards[-1]['win'] = -1
 
     @staticmethod
     def pack_policy_inputs(inputs):
