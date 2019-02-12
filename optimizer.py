@@ -180,6 +180,9 @@ class Sequence:
         # Repeat the rewards where a step has multiple actions, the reward gets repeated.
         self.vec_mh_rewards = torch.from_numpy(np.repeat(self.discounted_rewards, action_sum_per_step))
 
+    def calculate_normalized_rewards(self, mean, std):
+        self.vec_mh_rewards_norm = (self.vec_mh_rewards - mean) / (std + eps)
+
     def calculate_old_probs(self, policy):
         head_logits_dict, _, _ = policy.sequence(**self.states, hidden=None)
         mask_dict = Policy.unpack_heads(self.masks)
@@ -229,14 +232,14 @@ class DotaOptimizer:
         self.job_dir = job_dir
         self.entropy_coef = entropy_coef
         self.vf_coef = vf_coef
+        self.run_local = run_local
 
         self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
-        self.e_clip = 0.2
-        self.run_local = run_local
+        self.e_clip = 0.1
 
-        self.running_mean = None
-        self.running_std = None
+        self.running_mean = {int(team_id): None for team_id in [TEAM_RADIANT, TEAM_DIRE]}
+        self.running_std = {int(team_id): None for team_id in [TEAM_RADIANT, TEAM_DIRE]}
 
         if self.checkpoint:
             self.writer = SummaryWriter(log_dir=self.log_dir)
@@ -334,6 +337,16 @@ class DotaOptimizer:
 
         return data, subrewards, rollout_len, version, canvas
 
+    def update_running_mean_std(self, x, team_id):
+        mean_reward = x.mean()
+        mean_std = x.std()
+        if self.running_mean[team_id] is None:  #  First ever step
+            self.running_mean[team_id] = mean_reward
+            self.running_std[team_id] = mean_std
+        else:
+            self.running_mean[team_id] = self.running_mean[team_id] * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
+            self.running_std[team_id] = self.running_std[team_id] * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
+
     def experiences_from_rollout(self, data):
         # TODO(tzaman): The rollout can consist out of multiple viable sequences.
         # These should be padded and then sliced into separate experiences.
@@ -342,6 +355,7 @@ class DotaOptimizer:
         masks = data['masks']  # selected heads mask
         rewards = data['rewards']
         states = data['states']
+        team_id = data['team_id']
 
         # If applicable, pad the rollout so we can cut into distinct sequences.
         rollout_len = data['actions'].size(0)
@@ -368,6 +382,8 @@ class DotaOptimizer:
         # rollout.
         discounted_rewards = discount(x=np.sum(rewards, axis=1), gamma=0.98)
 
+        self.update_running_mean_std(x=discounted_rewards, team_id=team_id)
+
         # Slice the rollout into distinct sequences.
         sequences = []
         for s in range(n_sequences):
@@ -389,6 +405,9 @@ class DotaOptimizer:
                 weight_version=data['weight_version'],
                 team_id=data['team_id'],
             )
+            # Normalize the processed discounted rewards
+            sequence.calculate_normalized_rewards(mean=self.running_mean[team_id],
+                                                  std=self.running_std[team_id])
 
             # Finally, get the probabilties with the current policy.
             sequence.calculate_old_probs(policy=self.policy_old)
@@ -484,6 +503,14 @@ class DotaOptimizer:
                 'avg_weight_age': avg_weight_age,
             }
 
+            for team_id in self.running_mean:
+                if self.running_mean[team_id] is not None:
+                    metrics['rewards/running_mean_{}'.format(team_id)] = self.running_mean[team_id]
+
+            for team_id in self.running_std:
+                if self.running_std[team_id] is not None:
+                    metrics['rewards/running_std_{}'.format(team_id)] = self.running_std[team_id]
+
             for k, v in entropies.items():
                 metrics['entropy/{}'.format(k)] = v.mean()
 
@@ -528,28 +555,13 @@ class DotaOptimizer:
 
                 self.upload_model(version=it)
 
-    def normalize(self, x):
-        # TODO(tzaman): The running means and std's should be computed at the rollout phase,
-        # because (1) speed and (2) we are looping over this normalization an 'epoch' a mount of
-        # times.
-        mean_reward = x.mean()
-        mean_std = x.std()
-        if self.running_mean is None:  #  First step
-            self.running_mean = mean_reward
-            self.running_std = mean_std
-        else:
-            self.running_mean = self.running_mean * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
-            self.running_std = self.running_std * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
-
-        return (x - self.running_mean) / (self.running_std + eps)
-
     def train(self, experiences):
         # Train on one epoch of data.
         # Experiences is a list of (padded) experience chunks.
         logger.debug('train(experiences={})'.format(experiences))
 
         # Batch together all experiences.
-        vec_mh_rewards = torch.cat([e.vec_mh_rewards for e in experiences])
+        vec_mh_rewards_norm = torch.cat([e.vec_mh_rewards_norm for e in experiences])
         vec_action_mask = torch.cat([e.vec_action_mask for e in experiences])
         head_mask = torch.stack([e.vec_head_mask for e in experiences])  # [b, s, 59]
         vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
@@ -582,14 +594,9 @@ class DotaOptimizer:
         # Probability ratio
         rt = vec_selected_probs / (vec_old_probs + eps)
 
-        # TODO(tzaman): this normalizes takes into acount multi-heads too. We should use the
-        # pre-calculated mean and eps scalars to normalize by, since we will be going over this
-        # each piece of experience an 'episode' amount of times.
-        vec_mh_rewards = self.normalize(vec_mh_rewards)
-
         # PPO Objective
-        surr1 = rt * vec_mh_rewards
-        surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards
+        surr1 = rt * vec_mh_rewards_norm
+        surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards_norm
         policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
 
         # Check the entropy per head.
