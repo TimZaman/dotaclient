@@ -337,13 +337,16 @@ class Player:
         packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
         packed_rewards = self.pack_rewards(inputs=self.rewards)
 
+        actions = torch.stack(self.vec_actions)
+        masks = torch.stack(self.vec_selected_heads_mask)
+
         data = pickle.dumps({
             'game_id': self.game_id,
             'team_id': self.team_id,
             'player_id': self.player_id,
             'states': packed_policy_inputs,
-            'actions': torch.stack(self.vec_actions),
-            'masks': torch.stack(self.vec_selected_heads_mask),
+            'actions': actions,
+            'masks': masks,
             'rewards': packed_rewards,
             'weight_version': self.policy.weight_version,
             'canvas': self.drawing.canvas,
@@ -370,6 +373,7 @@ class Player:
         self.policy_inputs = []
         self.vec_actions = []
         self.rewards = []
+        self.vec_selected_heads_mask = []
 
     @staticmethod
     def unit_separation(state, team_id):
