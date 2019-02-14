@@ -562,7 +562,10 @@ class DotaOptimizer:
 
         # Batch together all experiences.
         vec_mh_rewards_norm = torch.cat([e.vec_mh_rewards_norm for e in experiences])
+        # The action mask contains the mask of the selected actions
         vec_action_mask = torch.cat([e.vec_action_mask for e in experiences])
+        # The head mask contains the mask of the relevant heads, where a selection has taken place,
+        # and includes only valid possible selections from those heads.
         head_mask = torch.stack([e.vec_head_mask for e in experiences])  # [b, s, 59]
         vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
 
@@ -591,6 +594,7 @@ class DotaOptimizer:
         # Now mask the probs by the selection
         vec_selected_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
 
+        # PPO
         # Probability ratio
         rt = vec_selected_probs / (vec_old_probs + eps)
 
@@ -598,6 +602,13 @@ class DotaOptimizer:
         surr1 = rt * vec_mh_rewards_norm
         surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards_norm
         policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
+
+        # # VPO
+        # print('vec_selected_probs', vec_selected_probs)
+        # print('vec_mh_rewards_norm', vec_mh_rewards_norm)
+        # policy_loss = -torch.log(vec_selected_probs) * vec_mh_rewards_norm
+        # print('policy_loss.shape=', policy_loss.shape)
+        # policy_loss = policy_loss.mean()
 
         # Check the entropy per head.
         entropies = {}
@@ -620,9 +631,17 @@ class DotaOptimizer:
             
             entropies[key] = -e.mean()
 
-        entropy = torch.stack(list(entropies.values())).sum()
-        entropy_loss = -self.entropy_coef * entropy
-        advantage_loss = self.vf_coef * (advantage.pow(2)).mean()
+        if self.entropy_coef > 0:
+            entropy = torch.stack(list(entropies.values())).sum()
+            entropy_loss = -self.entropy_coef * entropy
+        else:
+            entropy_loss = torch.tensor(0.)
+
+        if self.vf_coef > 0:
+            advantage_loss = self.vf_coef * (advantage.pow(2)).mean()
+        else:
+            advantage_loss = torch.tensor(0.)
+
         loss = policy_loss + entropy_loss + advantage_loss
 
         if torch.isnan(loss):
