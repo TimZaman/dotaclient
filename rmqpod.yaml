@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: foo
-spec:
-  containers:
-    - name: foo
-      image: gcr.io/dotaservice-225201/rmq:3.7-plugins
