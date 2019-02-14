@@ -594,21 +594,18 @@ class DotaOptimizer:
         # Now mask the probs by the selection
         vec_selected_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
 
-        # PPO
-        # Probability ratio
-        rt = vec_selected_probs / (vec_old_probs + eps)
+        # # PPO
+        # # Probability ratio
+        # rt = vec_selected_probs / (vec_old_probs + eps)
 
-        # PPO Objective
-        surr1 = rt * vec_mh_rewards_norm
-        surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards_norm
-        policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
+        # # PPO Objective
+        # surr1 = rt * vec_mh_rewards_norm
+        # surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards_norm
+        # policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
 
-        # # VPO
-        # print('vec_selected_probs', vec_selected_probs)
-        # print('vec_mh_rewards_norm', vec_mh_rewards_norm)
-        # policy_loss = -torch.log(vec_selected_probs) * vec_mh_rewards_norm
-        # print('policy_loss.shape=', policy_loss.shape)
-        # policy_loss = policy_loss.mean()
+        # VPO
+        policy_loss = -torch.log(vec_selected_probs) * vec_mh_rewards_norm
+        policy_loss = policy_loss.mean()
 
         # Check the entropy per head.
         entropies = {}
