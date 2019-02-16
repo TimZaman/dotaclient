@@ -114,7 +114,7 @@ def get_reward(prev_obs, obs, player_id):
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
     xp = get_total_xp(level=unit.level, xp_needed_to_level=unit.xp_needed_to_level)
-    reward['xp'] = (xp - xp_init) * 0.0002  # One creep is around 40 xp.
+    reward['xp'] = (xp - xp_init) * 0.001  # One creep is around 40 xp.
 
     # HP and death reward
     if unit_init.is_alive and unit.is_alive:
@@ -129,11 +129,11 @@ def get_reward(prev_obs, obs, player_id):
 
     # Last-hit reward
     lh = unit.last_hits - unit_init.last_hits
-    reward['lh'] = lh * 0.05
+    reward['lh'] = lh * 0.1
 
     # Deny reward
     denies = unit.denies - unit_init.denies
-    reward['denies'] = denies * 0.02
+    reward['denies'] = denies * 0.05
 
     # Tower hp reward. Note: towers have 1900 hp.
     reward['tower_hp'] = (mid_tower.health - mid_tower_init.health) / 1900.
