@@ -173,7 +173,7 @@ class WeightStore:
         model_blob = bucket.get_blob(model)
         tmp_model = '/tmp/model.pt'
         model_blob.download_to_filename(tmp_model)
-        state_dict = torch.load(tmp_model)
+        state_dict = torch.load(tmp_model, map_location=lambda storage, loc: storage)
         self.add(version=-1, state_dict=state_dict)
         self.ready.set()
 
@@ -184,7 +184,7 @@ async def model_callback(channel, body, envelope, properties):
     # TODO(tzaman): add a future so we can wait for first weights
     version = properties.headers['version']
     logger.info("Received new model: version={}, size={}b".format(version, len(body)))
-    state_dict = torch.load(io.BytesIO(body))
+    state_dict = torch.load(io.BytesIO(body), map_location=lambda storage, loc: storage)
     weight_store.add(version=version, state_dict=state_dict)
     weight_store.ready.set()
 
