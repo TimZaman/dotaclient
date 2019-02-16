@@ -226,7 +226,7 @@ class DotaOptimizer:
         self.learning_rate = learning_rate
         self.checkpoint = checkpoint
         self.mq_prefetch_count = mq_prefetch_count
-        self.iteration_start = 0
+        self.iteration_start = 1
         self.policy_base = Policy()
         self.exp_dir = exp_dir
         self.job_dir = job_dir
@@ -254,7 +254,7 @@ class DotaOptimizer:
             # If there's a model in here, we resume from there
             if latest_model is not None:
                 logger.info('Found a latest model in pretrained dir: {}'.format(latest_model))
-                self.iteration_start = self.iteration_from_model_filename(filename=latest_model)
+                self.iteration_start = self.iteration_from_model_filename(filename=latest_model) + 1
                 if pretrained_model is not None:
                     logger.warning('Overriding pretrained model by latest model.')
                 pretrained_model = latest_model
@@ -285,6 +285,11 @@ class DotaOptimizer:
                                prefetch_count=mq_prefetch_count,
                                use_model_exchange=self.checkpoint)
         self.mq.connect()
+
+        # Upload initial model before any step is taken, and only if we're not resuming.
+        if self.iteration_start == 1:
+            self.upload_model(version=0)
+
 
     @staticmethod
     def iteration_from_model_filename(filename):
@@ -729,9 +734,6 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         vf_coef=vf_coef,
         run_local=run_local,
     )
-
-    # Upload initial model.
-    dota_optimizer.upload_model(version=0)
 
     dota_optimizer.run()
 
