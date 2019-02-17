@@ -23,7 +23,10 @@ from dotaservice.protos.DotaService_pb2 import GameConfig
 from dotaservice.protos.DotaService_pb2 import HostMode
 from dotaservice.protos.DotaService_pb2 import ObserveConfig
 from dotaservice.protos.DotaService_pb2 import Status
-from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT
+from dotaservice.protos.DotaService_pb2 import TEAM_DIRE, TEAM_RADIANT, Hero, HeroPick, HeroControlMode
+from dotaservice.protos.DotaService_pb2 import HERO_CONTROL_MODE_IDLE, HERO_CONTROL_MODE_DEFAULT, HERO_CONTROL_MODE_CONTROLLED
+from dotaservice.protos.DotaService_pb2 import NPC_DOTA_HERO_NEVERMORE, NPC_DOTA_HERO_SNIPER
+
 from grpclib.client import Channel
 import aioamqp
 import grpc
@@ -256,10 +259,11 @@ class Player:
         Status.Value('DIRE_WIN'): TEAM_DIRE,
     }
 
-    def __init__(self, game_id, player_id, team_id, experience_channel, use_latest_weights, drawing):
+    def __init__(self, game_id, player_id, team_id, hero, experience_channel, use_latest_weights, drawing):
         self.game_id = game_id
         self.player_id = player_id
         self.team_id = team_id
+        self.hero = hero
         self.experience_channel = experience_channel
         self.use_latest_weights= use_latest_weights
 
@@ -590,7 +594,7 @@ class Player:
         hero_unit = get_unit(state, player_id=self.player_id)
 
         action_pb = CMsgBotWorldState.Action()
-        # action_pb.actionDelay = action_dict['delay'] * DELAY_ENUM_TO_STEP
+        action_pb.actionDelay = 0  # action_dict['delay'] * DELAY_ENUM_TO_STEP
         action_enum = action_dict['enum']
         if action_enum == 0:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value('DOTA_UNIT_ORDER_NONE')
@@ -669,16 +673,15 @@ class Game:
 
     ENV_RETRY_DELAY = 15
 
-    def __init__(self, config, dota_service, experience_channel, rollout_size, max_dota_time,
+    def __init__(self, dota_service, experience_channel, rollout_size, max_dota_time,
                  latest_weights_prob):
-        self.config = config
         self.dota_service = dota_service
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
         self.max_dota_time = max_dota_time
         self.latest_weights_prob = latest_weights_prob
 
-    async def play(self, game_id):
+    async def play(self, config, game_id):
         logger.info('Starting game.')
 
         use_latest_weights = {TEAM_RADIANT: True, TEAM_DIRE: True}
@@ -688,28 +691,27 @@ class Game:
 
         drawing = Drawing()  # TODO(tzaman): drawing should include include what's visible to the player
 
-        players = {
-            TEAM_RADIANT:
-            Player(
-                game_id=game_id,
-                player_id=0,
-                team_id=TEAM_RADIANT,
-                experience_channel=self.experience_channel,
-                use_latest_weights=use_latest_weights[TEAM_RADIANT],
-                drawing=drawing,
-                ),
-            TEAM_DIRE:
-            Player(
-                game_id=game_id,
-                player_id=5,
-                team_id=TEAM_DIRE,
-                experience_channel=self.experience_channel,
-                use_latest_weights=use_latest_weights[TEAM_DIRE],
-                drawing=drawing,
-                ),
-        }
-        
-        response = await asyncio.wait_for(self.dota_service.reset(self.config), timeout=120)
+        # Reset and obtain the initial observation. This dictates who we are controlling,
+        # this is done before the player definition, because there might be humand playing
+        # that take up bot positions.
+        response = await asyncio.wait_for(self.dota_service.reset(config), timeout=120)
+
+        player_request = config.hero_picks
+        players_response = response.players  # Lists all human and bot players.
+        players = {TEAM_RADIANT: [], TEAM_DIRE: []}
+        for p_req, p_res in zip(player_request, players_response):
+            assert p_req.team_id == p_req.team_id  # TODO(tzaman): more tests?
+            if p_res.is_bot and p_req.control_mode == HERO_CONTROL_MODE_CONTROLLED:
+                player = Player(
+                    game_id=game_id,
+                    player_id=p_res.id,
+                    team_id=p_res.team_id,
+                    hero=p_res.hero,
+                    experience_channel=self.experience_channel,
+                    use_latest_weights=use_latest_weights[p_res.team_id],
+                    drawing=drawing,
+                )
+                players[p_res.team_id].append(player)
 
         prev_obs = {
             TEAM_RADIANT: response.world_state_radiant,
@@ -720,9 +722,8 @@ class Game:
         dota_time = -float('Inf')
         end_state = None
         while dota_time < self.max_dota_time:
-            for team_id, player in players.items():  # TODO(tzaman): actually, should loop over teams first instead of players.
+            for team_id in [TEAM_RADIANT, TEAM_DIRE]:
                 logger.debug('\ndota_time={:.2f}, team={}'.format(dota_time, team_id))
-                player = players[team_id]
 
                 response = await self.dota_service.observe(ObserveConfig(team_id=team_id))
                 if response.status != Status.Value('OK'):
@@ -732,11 +733,15 @@ class Game:
                 obs = response.world_state
                 dota_time = obs.dota_time
 
-                player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
+                # We not loop over each player in this team and get each players action.
+                actions = []
+                for player in players[team_id]:
+                    player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
+                    with torch.no_grad():
+                        action_pb = player.obs_to_action(obs=obs)
+                    actions.append(action_pb)
 
-                with torch.no_grad():
-                    action_pb = player.obs_to_action(obs=obs)
-                actions_pb = CMsgBotWorldState.Actions(actions=[action_pb])
+                actions_pb = CMsgBotWorldState.Actions(actions=actions)
                 actions_pb.dota_time = obs.dota_time
 
                 _ = await self.dota_service.act(Actions(actions=actions_pb, team_id=team_id))
@@ -745,12 +750,12 @@ class Game:
 
             # Subtract eachothers rewards
             # TODO(tzaman): notice that the endstate (win reward) processing is not captured here.
-            rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
-            dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
-            players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
-            players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
+            # rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
+            # dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
+            # players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
+            # players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
 
-            for player in players.values():
+            for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
                 if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:
                     await player.rollout()
 
@@ -758,14 +763,13 @@ class Game:
                 break
 
         if end_state is not None:
-            
-            for player in players.values():
+            for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
                 player.process_endstate(end_state)
 
         # drawing.save(stem=game_id)  # HACK
 
         # Final rollout. Probably partial.
-        for player in players.values():
+        for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
             await player.rollout()
 
         # TODO(tzaman): the worldstate ends when game is over. the worldstate doesn't have info
@@ -797,22 +801,37 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
     channel_dota = Channel(DOTASERVICE_HOST, DOTASERVICE_PORT, loop=asyncio.get_event_loop())
     dota_service = DotaServiceStub(channel_dota)
 
-    config = GameConfig(
-        ticks_per_observation=TICKS_PER_OBSERVATION,
-        host_timescale=HOST_TIMESCALE,
-        host_mode=HOST_MODE,
-        game_mode=DOTA_GAMEMODE_1V1MID,
-    )
-
-    game = Game(config=config, dota_service=dota_service, experience_channel=experience_channel,
+    game = Game(dota_service=dota_service, experience_channel=experience_channel,
                 rollout_size=rollout_size, max_dota_time=max_dota_time,
                 latest_weights_prob=latest_weights_prob)
 
     for i in range(0, N_GAMES):
         logger.info('=== Starting Game {}.'.format(i))
         game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
+
+        hero_picks = [
+            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        ]
+
+        config = GameConfig(
+            ticks_per_observation=TICKS_PER_OBSERVATION,
+            host_timescale=HOST_TIMESCALE,
+            host_mode=HOST_MODE,
+            game_mode=DOTA_GAMEMODE_1V1MID,
+            hero_picks=hero_picks,
+        )
+
         try:
-            await game.play(game_id=game_id)
+            await game.play(config=config, game_id=game_id)
         except:
             traceback.print_exc()
             return
