@@ -127,8 +127,8 @@ def get_reward(prev_obs, obs, player_id):
         reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor * 0.2
 
     # Kill and death rewards
-    reward['kills'] = (player.kills - player_init.kills) * 0.5
-    reward['death'] = (player.deaths - player_init.deaths) * -0.5
+    reward['kills'] = (player.kills - player_init.kills) * 0.4
+    reward['death'] = (player.deaths - player_init.deaths) * -0.4
 
     # Last-hit reward
     lh = unit.last_hits - unit_init.last_hits
@@ -308,6 +308,10 @@ class Player:
                 self.rewards[-1]['win'] = 1
             else:
                 self.rewards[-1]['win'] = -1
+            return
+        
+        # Add a negative win reward, because the game has timed out.
+        self.rewards[-1]['win'] = -0.25
 
     @staticmethod
     def pack_policy_inputs(inputs):
@@ -722,6 +726,7 @@ class Game:
         dota_time = -float('Inf')
         end_state = None
         while dota_time < self.max_dota_time:
+            reward_sum_step = {TEAM_RADIANT:0, TEAM_DIRE:0}
             for team_id in [TEAM_RADIANT, TEAM_DIRE]:
                 logger.debug('\ndota_time={:.2f}, team={}'.format(dota_time, team_id))
 
@@ -737,6 +742,7 @@ class Game:
                 actions = []
                 for player in players[team_id]:
                     player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
+                    reward_sum_step[team_id] += sum(player.rewards[-1].values())
                     with torch.no_grad():
                         action_pb = player.obs_to_action(obs=obs)
                     actions.append(action_pb)
@@ -749,11 +755,9 @@ class Game:
                 prev_obs[team_id] = obs
 
             # Subtract eachothers rewards
-            # TODO(tzaman): notice that the endstate (win reward) processing is not captured here.
-            # rad_rew = sum(players[TEAM_RADIANT].rewards[-1].values())
-            # dire_rew = sum(players[TEAM_DIRE].rewards[-1].values())
-            # players[TEAM_RADIANT].rewards[-1]['enemy'] = -dire_rew
-            # players[TEAM_DIRE].rewards[-1]['enemy'] = -rad_rew
+            for team_id in [TEAM_RADIANT, TEAM_DIRE]:
+                for player in players[team_id]:
+                    player.rewards[-1]['enemy'] = -reward_sum_step[OPPOSITE_TEAM[team_id]]
 
             for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
                 if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:
