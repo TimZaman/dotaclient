@@ -933,7 +933,7 @@ if __name__ == '__main__':
     parser.add_argument("--use-latest-weights-prob", type=float,
                         help="Probability of using the latest weights. Otherwise some old one is chosen if available.", default=1.0)
     parser.add_argument("--validation", type=bool, help="Function as validation runner", default=False)
-    parser.add_argument("--log-dir", type=str, help="Logging directory")
+    parser.add_argument("--log-dir", type=str, help="Logging directory", default='')
     args = parser.parse_args()
 
     logger.setLevel(args.log_level)
