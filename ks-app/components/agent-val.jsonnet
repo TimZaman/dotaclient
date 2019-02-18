@@ -41,13 +41,26 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                             "python3.7",
                             "agent.py"
                         ],
+                        "env": [
+                            {
+                                "name": "GOOGLE_APPLICATION_CREDENTIALS",
+                                "value": "/etc/gcp/sa_credentials.json"
+                            }
+                        ],
                         "image": "gcr.io/dotaservice-225201/dotaclient:" + params.dotaclient_image_tag,
                         "name": "agent",
                         "resources": {
                             "requests": {
                                 "cpu": "700m"
                             }
-                        }
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/etc/gcp",
+                                "name": "gcs-secret",
+                                "readOnly": true
+                            }
+                        ]
                     },
                     {
                         "args": [
@@ -89,6 +102,18 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                             "medium": "Memory"
                         },
                         "name": "ramdisk"
+                    },
+                    {
+                        "name": "gcs-secret",
+                        "secret": {
+                            "items": [
+                                {
+                                    "key": "sa_json",
+                                    "path": "sa_credentials.json"
+                                }
+                            ],
+                            "secretName": "gcs-admin-secret"
+                        }
                     }
                 ]
             }
