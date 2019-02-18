@@ -208,7 +208,7 @@ class DotaOptimizer:
 
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
-    RUNNING_NORM_FACTOR = 0.95
+    RUNNING_NORM_FACTOR = 0.99  # Updates with every received rollout.
     MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
     SPEED_KEY = 'steps per s'
