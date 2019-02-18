@@ -1,6 +1,7 @@
 from collections import Counter
 from collections import deque
 from datetime import datetime
+from functools import lru_cache
 from pprint import pprint, pformat
 import argparse
 import asyncio
@@ -28,6 +29,7 @@ from dotaservice.protos.DotaService_pb2 import HERO_CONTROL_MODE_IDLE, HERO_CONT
 from dotaservice.protos.DotaService_pb2 import NPC_DOTA_HERO_NEVERMORE, NPC_DOTA_HERO_SNIPER
 
 from grpclib.client import Channel
+from tensorboardX import SummaryWriter
 import aioamqp
 import grpc
 import numpy as np
@@ -91,6 +93,18 @@ xp_to_reach_level = {
     24: 24405,
     25: 26905
 }
+
+writer = None
+
+def events_filename_from_writer(writer):
+    return writer.file_writer.event_writer._ev_writer._file_name
+
+@lru_cache()
+def gcs_bucket():
+    from google.cloud import storage
+    client = storage.Client()
+    bucket = client.get_bucket('dotaservice')
+    return bucket
 
 
 def get_total_xp(level, xp_needed_to_level):
@@ -170,9 +184,7 @@ class WeightStore:
         return self.weights[-1]
 
     def load_from_gcs(self, model):
-        from google.cloud import storage
-        client = storage.Client()
-        bucket = client.get_bucket('dotaservice')
+        bucket = gcs_bucket()
         model_blob = bucket.get_blob(model)
         tmp_model = '/tmp/model.pt'
         model_blob.download_to_filename(tmp_model)
@@ -259,7 +271,8 @@ class Player:
         Status.Value('DIRE_WIN'): TEAM_DIRE,
     }
 
-    def __init__(self, game_id, player_id, team_id, hero, experience_channel, use_latest_weights, drawing):
+    def __init__(self, game_id, player_id, team_id, hero, experience_channel, use_latest_weights, drawing,
+                 validation):
         self.game_id = game_id
         self.player_id = player_id
         self.team_id = team_id
@@ -273,14 +286,22 @@ class Player:
         self.rewards = []
         self.hidden = None
         self.drawing = drawing
+        self.validation = validation
 
         self.creeps_had_spawned = False
 
-        if use_latest_weights:
+        use_synced_weights = use_latest_weights and not self.validation
+
+        if use_synced_weights:
             # This will actually use the latest policy, that is even updated while the agent is playing.
             self.policy = weight_store.latest_policy
-        else:
-            version, state_dict = weight_store.oldest_weights()
+        else:  # Use non-synchronized weights
+            if self.validation or use_latest_weights:
+                # Use the latest weights for validation
+                version, state_dict = weight_store.latest_weights()
+            else:
+                # Use the oldest weights.
+                version, state_dict = weight_store.oldest_weights()
             self.policy = Policy()
             self.policy.load_state_dict(state_dict, strict=True)
             self.policy.weight_version = version
@@ -289,15 +310,17 @@ class Player:
         logger.info('Player {} using weights version {}'.format(
             self.player_id, self.policy.weight_version))
 
-    def print_reward_summary(self):
+    def summed_subrewards(self):
         reward_counter = Counter()
         for r in self.rewards:
             reward_counter.update(r)
-        reward_counter = dict(reward_counter)
+        return dict(reward_counter)
 
-        reward_sum = sum(reward_counter.values())
+    def print_reward_summary(self):
+        subrewards = self.summed_subrewards()
+        reward_sum = sum(subrewards.values())
         logger.info('Player {} reward sum: {:.2f} subrewards:\n{}'.format(
-            self.player_id, reward_sum, pformat(reward_counter)))
+            self.player_id, reward_sum, pformat(subrewards)))
 
     def process_endstate(self, end_state):
         # The end-state adds rewards to the last reward.
@@ -310,8 +333,9 @@ class Player:
                 self.rewards[-1]['win'] = -1
             return
         
-        # Add a negative win reward, because the game has timed out.
+        # Add a negative win reward, because we did not have a clear winner.
         self.rewards[-1]['win'] = -0.25
+
 
     @staticmethod
     def pack_policy_inputs(inputs):
@@ -365,6 +389,27 @@ class Player:
     @property
     def steps_queued(self):
         return len(self.rewards)
+
+    def write_validation(self):
+        it = self.policy.weight_version
+        writer.add_image('game/canvas', self.drawing.canvas, it, dataformats='HWC')
+        writer.add_scalar('game/steps', self.steps_queued, it)
+        subrewards = self.summed_subrewards()
+        reward_sum = sum(subrewards.values())
+        writer.add_scalar('game/rewards_sum', reward_sum, it)
+        for key, reward in subrewards.items():
+            writer.add_scalar('game/rewards_{}'.format(key), reward, it)
+        # Upload events to GCS
+        writer.file_writer.flush()  # Flush before uploading
+        events_filename = events_filename_from_writer(writer)
+        blob = gcs_bucket().blob(events_filename)
+        blob.upload_from_filename(filename=events_filename)
+
+    async def finish(self):
+        if self.validation:
+            self.write_validation()
+        else:
+            await self.rollout()
 
     async def rollout(self):
         logger.info('Player {} rollout.'.format(self.player_id))
@@ -678,12 +723,13 @@ class Game:
     ENV_RETRY_DELAY = 15
 
     def __init__(self, dota_service, experience_channel, rollout_size, max_dota_time,
-                 latest_weights_prob):
+                 latest_weights_prob, validation):
         self.dota_service = dota_service
         self.experience_channel = experience_channel
         self.rollout_size = rollout_size
         self.max_dota_time = max_dota_time
         self.latest_weights_prob = latest_weights_prob
+        self.validation = validation
 
     async def play(self, config, game_id):
         logger.info('Starting game.')
@@ -714,6 +760,7 @@ class Game:
                     experience_channel=self.experience_channel,
                     use_latest_weights=use_latest_weights[p_res.team_id],
                     drawing=drawing,
+                    validation=self.validation,
                 )
                 players[p_res.team_id].append(player)
 
@@ -754,27 +801,25 @@ class Game:
 
                 prev_obs[team_id] = obs
 
-            # Subtract eachothers rewards
-            for team_id in [TEAM_RADIANT, TEAM_DIRE]:
-                for player in players[team_id]:
-                    player.rewards[-1]['enemy'] = -reward_sum_step[OPPOSITE_TEAM[team_id]]
+            if not self.validation:
+                # Subtract eachothers rewards
+                for team_id in [TEAM_RADIANT, TEAM_DIRE]:
+                    for player in players[team_id]:
+                        player.rewards[-1]['enemy'] = -reward_sum_step[OPPOSITE_TEAM[team_id]]
 
-            for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
-                if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:
-                    await player.rollout()
+                for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
+                    if player.steps_queued > 0 and player.steps_queued % self.rollout_size == 0:
+                        await player.rollout()
 
             if done:
                 break
 
-        if end_state is not None:
-            for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
-                player.process_endstate(end_state)
-
         # drawing.save(stem=game_id)  # HACK
 
-        # Final rollout. Probably partial.
+        # Finish (e.g. final rollout or send validation metrics).
         for player in [*players[TEAM_RADIANT], *players[TEAM_DIRE]]:
-            await player.rollout()
+            player.process_endstate(end_state)
+            await player.finish()
 
         # TODO(tzaman): the worldstate ends when game is over. the worldstate doesn't have info
         # about who won the game: so we need to get info from that somehow
@@ -782,14 +827,19 @@ class Game:
         logger.info('Game finished.')
 
 
-async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_prob, initial_model):
+async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_prob, initial_model, validation,
+               log_dir):
     logger.info('main(rmq_host={}, rmq_port={})'.format(rmq_host, rmq_port))
+
     # RMQ
     rmq_connection = pika.BlockingConnection(pika.ConnectionParameters(host=rmq_host, port=rmq_port, heartbeat=300))
     experience_channel = rmq_connection.channel()
     experience_channel.queue_declare(queue=EXPERIENCE_QUEUE_NAME)
 
     weight_store.ready = asyncio.Event(loop=asyncio.get_event_loop())
+
+    global writer
+    writer = SummaryWriter(log_dir=log_dir)
 
     # Optionally
     if initial_model:
@@ -807,32 +857,16 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
 
     game = Game(dota_service=dota_service, experience_channel=experience_channel,
                 rollout_size=rollout_size, max_dota_time=max_dota_time,
-                latest_weights_prob=latest_weights_prob)
+                latest_weights_prob=latest_weights_prob, validation=validation)
+
+    if validation:
+        config = get_1v1_bot_vs_default_config()
+    else:
+        config = get_1v1_selfplay_config()
 
     for i in range(0, N_GAMES):
         logger.info('=== Starting Game {}.'.format(i))
         game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
-
-        hero_picks = [
-            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
-            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
-            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-            HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-        ]
-
-        config = GameConfig(
-            ticks_per_observation=TICKS_PER_OBSERVATION,
-            host_timescale=HOST_TIMESCALE,
-            host_mode=HOST_MODE,
-            game_mode=DOTA_GAMEMODE_1V1MID,
-            hero_picks=hero_picks,
-        )
 
         try:
             await game.play(config=config, game_id=game_id)
@@ -841,6 +875,50 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
             return
 
     channel_dota.close()
+
+
+def get_1v1_bot_vs_default_config():
+    hero_picks = [
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_DEFAULT),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+    ]
+    return GameConfig(
+        ticks_per_observation=TICKS_PER_OBSERVATION,
+        host_timescale=HOST_TIMESCALE,
+        host_mode=HOST_MODE,
+        game_mode=DOTA_GAMEMODE_1V1MID,
+        hero_picks=hero_picks,
+    )
+
+
+def get_1v1_selfplay_config():
+    hero_picks = [
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
+    ]
+    return GameConfig(
+        ticks_per_observation=TICKS_PER_OBSERVATION,
+        host_timescale=HOST_TIMESCALE,
+        host_mode=HOST_MODE,
+        game_mode=DOTA_GAMEMODE_1V1MID,
+        hero_picks=hero_picks,
+    )
 
 
 if __name__ == '__main__':
@@ -854,6 +932,8 @@ if __name__ == '__main__':
     parser.add_argument("--model", type=str, help="Initial model to immediatelly start")
     parser.add_argument("--use-latest-weights-prob", type=float,
                         help="Probability of using the latest weights. Otherwise some old one is chosen if available.", default=1.0)
+    parser.add_argument("--validation", type=bool, help="Function as validation runner", default=False)
+    parser.add_argument("--log-dir", type=str, help="Logging directory")
     args = parser.parse_args()
 
     logger.setLevel(args.log_level)
@@ -861,5 +941,5 @@ if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     coro = main(rmq_host=args.ip, rmq_port=args.port, rollout_size=args.rollout_size,
                 max_dota_time=args.max_dota_time, latest_weights_prob=args.use_latest_weights_prob,
-                initial_model=args.model)
+                initial_model=args.model, validation=args.validation, log_dir=args.log_dir)
     loop.run_until_complete(coro)
