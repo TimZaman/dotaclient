@@ -864,14 +864,14 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
                 rollout_size=rollout_size, max_dota_time=max_dota_time,
                 latest_weights_prob=latest_weights_prob, validation=validation)
 
-    if validation:
-        config = get_1v1_bot_vs_default_config()
-    else:
-        config = get_1v1_selfplay_config()
-
     for i in range(0, N_GAMES):
         logger.info('=== Starting Game {}.'.format(i))
         game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
+
+        if validation:
+            config = get_1v1_bot_vs_default_config()
+        else:
+            config = get_1v1_selfplay_config()
 
         try:
             await game.play(config=config, game_id=game_id)
@@ -883,13 +883,16 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
 
 
 def get_1v1_bot_vs_default_config():
+    # Randomize the mode between dire and radiant players.
+    modes = [HERO_CONTROL_MODE_DEFAULT, HERO_CONTROL_MODE_CONTROLLED]
+    random.shuffle(modes)
     hero_picks = [
-        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_DEFAULT),
+        HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=modes[0]),
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
-        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=HERO_CONTROL_MODE_CONTROLLED),
+        HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=modes[1]),
         HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
         HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
         HeroPick(team_id=TEAM_DIRE, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
