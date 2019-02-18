@@ -428,7 +428,7 @@ class DotaOptimizer:
         assert self.seq_per_epoch % self.batch_size == 0
 
         for it in range(self.iteration_start, self.iterations):
-            logger.info('iteration {}/{}'.format(it + 1, self.iterations))
+            logger.info('iteration {}/{}'.format(it, self.iterations))
 
             # First grab a bunch of experiences
             experiences = []
@@ -542,7 +542,7 @@ class DotaOptimizer:
                 self.writer.add_histogram('rewards_per_sec_per_rollout', rollout_rewards, it)
 
                 # Model
-                if it % self.MODEL_HISTOGRAM_FREQ == 0:
+                if it % self.MODEL_HISTOGRAM_FREQ == 1:
                     for name, param in self.policy_base.named_parameters():
                         self.writer.add_histogram('param/' + name, param.clone().cpu().data.numpy(), it)
                         self.writer.add_image('canvas', canvas, it, dataformats='HWC')
