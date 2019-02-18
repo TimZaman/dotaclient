@@ -700,7 +700,7 @@ def init_distribution(backend='gloo'):
 
 
 def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
-         pretrained_model, mq_prefetch_count, exp_dir, log_dir, entropy_coef, vf_coef, run_local):
+         pretrained_model, mq_prefetch_count, log_dir, entropy_coef, vf_coef, run_local):
     logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
                 ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={}, vf_coef={})'.format(
         rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
@@ -726,7 +726,6 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         checkpoint=checkpoint,
         pretrained_model=pretrained_model,
         mq_prefetch_count=mq_prefetch_count,
-        exp_dir=exp_dir,
         log_dir=log_dir,
         entropy_coef=entropy_coef,
         vf_coef=vf_coef,
