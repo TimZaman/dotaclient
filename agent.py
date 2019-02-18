@@ -278,7 +278,7 @@ class Player:
         self.team_id = team_id
         self.hero = hero
         self.experience_channel = experience_channel
-        self.use_latest_weights= use_latest_weights
+        self.use_latest_weights = use_latest_weights
 
         self.policy_inputs = []
         self.vec_actions = []
@@ -420,7 +420,10 @@ class Player:
 
         self.print_reward_summary()
 
-        self._send_experience_rmq()
+        if self.use_latest_weights:
+            self._send_experience_rmq()
+        else:
+            logger.info('Not using latest weights: not rolling out.')
 
         # Reset states.
         self.policy_inputs = []
