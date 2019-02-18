@@ -523,6 +523,10 @@ class Player:
                 # HACK: Make a nice interface for this, per enum used?
                 if unit.is_invulnerable or unit.is_attack_immune:
                     handles[i] = -1
+                elif unit.team_id == OPPOSITE_TEAM[hero_unit.team_id] and unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER') and unit.anim_activity == 1500:
+                    # Enemy tower. Due to a dota bug, the bot API can only attack towers (and move to it)
+                    # when they are attacking (activity 1503; stationary is activity 1500)
+                    handles[i] = -1
                 elif unit.team_id == hero_unit.team_id and unit.unit_type == CMsgBotWorldState.UnitType.Value('TOWER'):
                     # Its own tower:
                     handles[i] = -1
