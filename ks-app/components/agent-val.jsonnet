@@ -4,23 +4,23 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
     "kind": "Deployment",
     "metadata": {
         "labels": {
-            "app": "dotaservice",
+            "app": "agent-val",
             "job": params.jobname,
         },
-        "name": params.jobname + "-dotaservice"
+        "name": params.jobname + "-agent-val"
     },
     "spec": {
-        "replicas": params.agents,
+        "replicas": 1,
         "selector": {
             "matchLabels": {
-                "app": "dotaservice",
+                "app": "agent-val",
                 "job": params.jobname
             }
         },
         "template": {
             "metadata": {
                 "labels": {
-                    "app": "dotaservice",
+                    "app": "agent-val",
                     "job": params.jobname,
                 }
             },
@@ -30,10 +30,12 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                         "args": [
                             "--ip",
                             params.jobname + "-rmq.default.svc.cluster.local",
-                            "--rollout-size",
-                            std.toString(params.rollout_size),
                             "--max-dota-time",
-                            std.toString(params.max_dota_time)
+                            std.toString(params.max_dota_time),
+                            "--validation",
+                            "1",
+                            "--log-dir",
+                            std.toString(params.expname) + "/" + std.toString(params.jobname) + "/val"
                         ],
                         "command": [
                             "python3.7",

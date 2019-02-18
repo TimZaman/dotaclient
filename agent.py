@@ -737,8 +737,10 @@ class Game:
     async def play(self, config, game_id):
         logger.info('Starting game.')
 
+        # Use the latest weights by default.
         use_latest_weights = {TEAM_RADIANT: True, TEAM_DIRE: True}
         if random.random() > self.latest_weights_prob:
+            # Randomly pick the ream that will use the old weights.
             old_model_team = random.choice([TEAM_RADIANT, TEAM_DIRE])
             use_latest_weights[old_model_team] = False
 
@@ -928,7 +930,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
-    parser.add_argument("--rollout-size", type=int, help="size of each rollout (steps)", default=256)
+    parser.add_argument("--rollout-size", type=int, help="size of each rollout (steps)", default=1e6)
     parser.add_argument("--max-dota-time", type=int, help="Maximum in-game (dota) time of a game before restarting", default=600)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')

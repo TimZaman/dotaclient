@@ -123,10 +123,8 @@ local worker(replicas) = {
                                     std.toString(params.entropy_coef),
                                     "--vf-coef",
                                     std.toString(params.vf_coef),
-                                    "--exp-dir",
-                                    std.toString(params.expname),
-                                    "--job-dir",
-                                    std.toString(params.jobname),
+                                    "--log-dir",
+                                    std.toString(params.expname) + "/" + std.toString(params.jobname),
                                 ] + if params.pretrained_model == '' then [] else [
                                     '--pretrained-model', params.pretrained_model ,
                                 ],

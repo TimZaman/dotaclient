@@ -214,7 +214,7 @@ class DotaOptimizer:
     SPEED_KEY = 'steps per s'
 
     def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
-                 learning_rate, checkpoint, pretrained_model, mq_prefetch_count, exp_dir, job_dir,
+                 learning_rate, checkpoint, pretrained_model, mq_prefetch_count, log_dir,
                  entropy_coef, vf_coef, run_local):
         super().__init__()
         self.rmq_host = rmq_host
@@ -228,13 +228,11 @@ class DotaOptimizer:
         self.mq_prefetch_count = mq_prefetch_count
         self.iteration_start = 1
         self.policy_base = Policy()
-        self.exp_dir = exp_dir
-        self.job_dir = job_dir
+        self.log_dir = log_dir
         self.entropy_coef = entropy_coef
         self.vf_coef = vf_coef
         self.run_local = run_local
 
-        self.log_dir = os.path.join(exp_dir, job_dir)
         self.iterations = 10000
         self.e_clip = 0.1
 
@@ -702,7 +700,7 @@ def init_distribution(backend='gloo'):
 
 
 def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
-         pretrained_model, mq_prefetch_count, exp_dir, job_dir, entropy_coef, vf_coef, run_local):
+         pretrained_model, mq_prefetch_count, exp_dir, log_dir, entropy_coef, vf_coef, run_local):
     logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
                 ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={}, vf_coef={})'.format(
         rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
@@ -729,7 +727,7 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         pretrained_model=pretrained_model,
         mq_prefetch_count=mq_prefetch_count,
         exp_dir=exp_dir,
-        job_dir=job_dir,
+        log_dir=log_dir,
         entropy_coef=entropy_coef,
         vf_coef=vf_coef,
         run_local=run_local,
@@ -738,14 +736,13 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
     dota_optimizer.run()
 
 
-def default_job_dir():
+def default_log_dir():
     return '{}_{}'.format(datetime.now().strftime('%b%d_%H-%M-%S'), socket.gethostname())
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--exp-dir", type=str, help="experiment dir name", default='runs')
-    parser.add_argument("--job-dir", type=str, help="job dir name", default=default_job_dir())
+    parser.add_argument("--log-dir", type=str, help="log and job dir name", default=default_log_dir())
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--epochs", type=int, help="amount of epochs", default=4)
@@ -777,8 +774,7 @@ if __name__ == '__main__':
             learning_rate=args.learning_rate,
             pretrained_model=args.pretrained_model,
             mq_prefetch_count=args.mq_prefetch_count,
-            exp_dir=args.exp_dir,
-            job_dir=args.job_dir,
+            log_dir=args.log_dir,
             entropy_coef=args.entropy_coef,
             vf_coef=args.vf_coef,
             run_local=args.run_local,
