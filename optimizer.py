@@ -316,16 +316,6 @@ class DotaOptimizer:
     def events_filename(self):
         return self.writer.file_writer.event_writer._ev_writer._file_name
 
-    def optimize(self, probs, rewards):
-        log_probs = torch.log(probs)
-        loss = torch.mul(-log_probs, rewards)
-        self.optimizer.zero_grad()
-        loss = loss.mean()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
-        self.optimizer.step()
-        return loss
-
     def get_rollout(self):
         # TODO(tzaman): make a rollout object
         method, properties, body = self.mq.consume_xp()
