@@ -610,8 +610,8 @@ class DotaOptimizer:
             p = torch.exp(logp).clone()
             p[~mask_dict[key]] = 0.
             e = p * logp
-            e[~mask_dict[key]] = 0  # Zero out any non-used actions
             e = e.sum(dim=2)
+            e = e[e != 0]
             if e.size(0) == 0:
                 # When no action of this kind was chosen.
                 e = torch.zeros([])
