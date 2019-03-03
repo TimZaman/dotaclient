@@ -616,23 +616,18 @@ class Player:
 
         logger.debug('policy_input:\n' + pformat(policy_input))
 
-        head_logits_dict, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
+        heads_logits, value, self.hidden = self.policy.single(**policy_input, hidden=self.hidden)
 
-        logger.debug('head_logits_dict:\n' + pformat(head_logits_dict))
+        logger.debug('heads_logits:\n' + pformat(heads_logits))
         logger.debug('value={}'.format(value))
 
-        # Select valid actions. This mask contains all viable actions.
+        # Get valid actions. This mask contains all viable actions.
         action_masks = Policy.action_masks(unit_handles=unit_handles)
         logger.debug('action_masks:\n' + pformat(action_masks))
 
-        # Perform a masked softmax
-        head_prob_dict = {}
-        for key in head_logits_dict:
-            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=action_masks[key])
-
-        logger.debug('head_prob_dict (masked):\n' + pformat(head_prob_dict))
-
-        action_dict = Policy.select_actions(head_prob_dict=head_prob_dict)
+        # From the heads logits and their masks, select the actions.
+        action_dict = Policy.select_actions(heads_logits=heads_logits, masks=action_masks)
+        logger.debug('action_dict:\n' + pformat(action_dict))
 
         # Given the action selections, get the head mask.
         head_masks = Policy.head_masks(selections=action_dict)

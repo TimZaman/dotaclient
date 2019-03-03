@@ -1,0 +1,128 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: rmq
+    job: job2
+    ksonnet.io/component: rmq
+  name: job2-rmq
+spec:
+  ports:
+  - name: http
+    port: 15672
+    protocol: TCP
+    targetPort: 15672
+  - name: amqp
+    port: 5672
+    protocol: TCP
+    targetPort: 5672
+  selector:
+    app: rmq
+    job: job2
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: dotaservice
+    job: job2
+    ksonnet.io/component: dotaservice
+  name: job2-dotaservice
+spec:
+  replicas: 14
+  selector:
+    matchLabels:
+      app: dotaservice
+      job: job2
+  template:
+    metadata:
+      labels:
+        app: dotaservice
+        job: job2
+    spec:
+      containers:
+      - args:
+        - --ip
+        - job2-rmq.default.svc.cluster.local
+        - --rollout-size
+        - "9999"
+        - --max-dota-time
+        - "600"
+        command:
+        - python3.7
+        - agent.py
+        image: gcr.io/dotaservice-225201/dotaclient:latest
+        name: agent
+        resources:
+          requests:
+            cpu: 700m
+      - args:
+        - --action-path
+        - /ramdisk
+        command:
+        - python3.7
+        - -m
+        - dotaservice
+        image: gcr.io/dotaservice-225201/dotaservice:0.3.8
+        name: dotaservice
+        ports:
+        - containerPort: 13337
+        resources:
+          requests:
+            cpu: 800m
+            memory: 1536Mi
+        volumeMounts:
+        - mountPath: /ramdisk
+          name: ramdisk
+      nodeSelector:
+        cloud.google.com/gke-preemptible: "true"
+      volumes:
+      - emptyDir:
+          medium: Memory
+        name: ramdisk
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rmq
+    job: job2
+    ksonnet.io/component: rmq
+  name: job2-rmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rmq
+      job: job2
+  template:
+    metadata:
+      labels:
+        app: rmq
+        job: job2
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-preemptible
+                operator: DoesNotExist
+      containers:
+      - image: gcr.io/dotaservice-225201/rmq:3.7-plugins
+        name: rmq
+        ports:
+        - containerPort: 15672
+          name: http
+          protocol: TCP
+        - containerPort: 5672
+          name: amqp
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1024Mi
+---
+

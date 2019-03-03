@@ -32,6 +32,8 @@ logger.setLevel(logging.INFO)
 # torch.set_printoptions(profile="full")
 
 torch.manual_seed(7)
+random.seed(7)
+np.random.seed(7)
 
 eps = np.finfo(np.float32).eps.item()
 
@@ -183,19 +185,19 @@ class Sequence:
     def calculate_normalized_rewards(self, mean, std):
         self.vec_mh_rewards_norm = (self.vec_mh_rewards - mean) / (std + eps)
 
-    def calculate_old_probs(self, policy):
-        head_logits_dict, _, _ = policy.sequence(**self.states, hidden=None)
-        mask_dict = Policy.unpack_heads(self.masks)
-        # Perform a masked softmax
-        head_prob_dict = {}
-        for key in head_logits_dict:
-            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
+    # def calculate_old_probs(self, policy):
+    #     head_logits_dict, _, _ = policy.sequence(**self.states, hidden=None)
+    #     mask_dict = Policy.unpack_heads(self.masks)
+    #     # Perform a masked softmax
+    #     head_prob_dict = {}
+    #     for key in head_logits_dict:
+    #         head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
 
-        vec_probs_all = policy.flatten_head(head_prob_dict).view(-1)
+    #     vec_probs_all = policy.flatten_head(head_prob_dict).view(-1)
 
-        # Now mask the probs by the selection
-        self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
-        self.vec_old_probs = self.vec_old_probs.detach()
+    #     # Now mask the probs by the selection
+    #     self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
+    #     self.vec_old_probs = self.vec_old_probs.detach()
 
 
 def all_gather(t):
@@ -403,7 +405,7 @@ class DotaOptimizer:
                                                   std=self.running_std[team_id])
 
             # Finally, get the probabilties with the current policy.
-            sequence.calculate_old_probs(policy=self.policy_old)
+            # sequence.calculate_old_probs(policy=self.policy_old)
             sequences.append(sequence)
         return sequences
 
@@ -560,7 +562,7 @@ class DotaOptimizer:
         # The head mask contains the mask of the relevant heads, where a selection has taken place,
         # and includes only valid possible selections from those heads.
         head_mask = torch.stack([e.vec_head_mask for e in experiences])  # [b, s, 59]
-        vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
+        # vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
 
         states = {key: [] for key in Policy.INPUT_KEYS}
         for e in experiences:
@@ -578,14 +580,14 @@ class DotaOptimizer:
         mask_dict = Policy.unpack_heads(head_mask)
 
         # Perform a masked softmax
-        head_prob_dict = {}
+        head_log_prob_dict = {}
         for key in head_logits_dict:
-            head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
+            head_log_prob_dict[key] = Policy.masked_softmax(logits=head_logits_dict[key], mask=mask_dict[key])
 
-        vec_probs_all = Policy.flatten_head(head_prob_dict).view(-1)
+        vec_log_probs_all = Policy.flatten_head(inputs=head_log_prob_dict).view(-1)
 
         # Now mask the probs by the selection
-        vec_selected_probs = torch.masked_select(input=vec_probs_all, mask=vec_action_mask)
+        vec_selected_log_probs = torch.masked_select(input=vec_log_probs_all, mask=vec_action_mask)
 
         # # PPO
         # # Probability ratio
@@ -597,28 +599,22 @@ class DotaOptimizer:
         # policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
 
         # VPO
-        policy_loss = -torch.log(vec_selected_probs) * vec_mh_rewards_norm
+        policy_loss = -vec_selected_log_probs * vec_mh_rewards_norm
         policy_loss = policy_loss.mean()
 
-        # Check the entropy per head.
+        # # Check the entropy per head.
         entropies = {}
         for key in head_logits_dict:
-            p = head_prob_dict[key]
-            # Because of the masking, to get ln(p), we need to do some tricks. We set values
-            # that should be masked out to 1, because ln(1) = 0, they they won't become NaN.
-            # Although we could mask these out later, and we do, pytorch seems to want us to do
-            # this here already.
-            logp = p.clone()
-            logp[~mask_dict[key]] = 1
-            logp = torch.log(logp + eps)
+            logp = head_log_prob_dict[key].clone()
+            logp[~mask_dict[key]] = 0.
+            p = torch.exp(logp).clone()
+            p[~mask_dict[key]] = 0.
             e = p * logp
             e[~mask_dict[key]] = 0  # Zero out any non-used actions
             e = e.sum(dim=2)
-            e = e[e!=0]  # Filter out zero entries (padded)
             if e.size(0) == 0:
                 # When no action of this kind was chosen.
                 e = torch.zeros([])
-            
             entropies[key] = -e.mean()
 
         if self.entropy_coef > 0:

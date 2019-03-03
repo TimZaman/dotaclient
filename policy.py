@@ -19,6 +19,20 @@ TICKS_PER_OBSERVATION = 15 # HACK!
 
 REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'tower_hp']
 
+
+class MaskedCategorical():
+
+    def __init__(self, log_probs, mask):
+        self.log_probs = log_probs
+        self.mask = mask
+        self.masked_probs = torch.exp(log_probs).clone()
+        self.masked_probs[~mask] = 0.
+        # print('self.masked_probs=', self.masked_probs)
+
+    def sample(self):
+        return torch.multinomial(self.masked_probs[-1], num_samples=1)
+
+
 class Policy(nn.Module):
 
     TICKS_PER_SECOND = 30
@@ -152,12 +166,15 @@ class Policy(nn.Module):
         return d, value, hidden
 
     @classmethod
-    def masked_softmax(cls, x, mask, dim=2):
-        exps = torch.exp(x)
-        masked_exps = exps * mask.float()
-        masked_sums = masked_exps.sum(dim, keepdim=True)
-        # Eps here is very small bc nonmasked targets might have very small probabilities.
-        return (masked_exps / (masked_sums + 1e-13))
+    def masked_softmax(cls, logits, mask, dim=2):
+        """Returns log-probabilities."""
+        exp = torch.exp(logits)
+        masked_exp = exp.clone()
+        masked_exp[~mask] = 0.
+        masked_sumexp = masked_exp.sum(dim, keepdim=True)
+        logsumexp = torch.log(masked_sumexp)
+        log_probs = logits - logsumexp
+        return log_probs
 
     @classmethod
     def flatten_selections(cls, inputs):
@@ -206,38 +223,37 @@ class Policy(nn.Module):
         # Put it back together
         return torch.cat([enumh, xh, yh, target_unith], dim=1)
 
-    @staticmethod
-    def sample_action(probs, espilon=0.15):
+    @classmethod
+    def sample_action(cls, logits, mask, espilon=0.15):
         # TODO(tzaman): Have the sampler kind be user-configurable.
-        # Epsilon-greedy is terrible e.g. in cases where the prob is every evenly divided over choices;
-        # it will totally offset to one choice (e.g. esp with movement x or y).
+        # NOTE(tzaman): Epsilon-greedy is terrible e.g. in cases where the prob is every evenly
+        # divided over choices: it will totally offset to one choice (e.g. esp with movement x or y).
 
         # Below is episilon-random-uniform-stocastic
         if torch.rand(1) < espilon:
-            probs = (probs > 0).reshape(1, 1, -1).float()  # Makes it into a binary array
-            probs += eps  # Add eps to avoid pytorch negative issue.
-            return Categorical(probs).sample()
+            # `torch.multinomial` samples based on weights, so using the mask is already evenly
+            # distributing the probabilities of all viable actions.
+            sample = torch.multinomial(mask[-1].float(), num_samples=1)
+            return sample
         else:
-            # return torch.argmax(probs, dim=2)  # Greedy
-            return Categorical(probs).sample()
-        
-        # Purely stochastic
-        # return Categorical(probs).sample()
+            log_probs = cls.masked_softmax(logits=logits, mask=mask)
+            sample = MaskedCategorical(log_probs=log_probs, mask=mask).sample()
+            return sample
 
     @classmethod
-    def select_actions(cls, head_prob_dict):
-        # From all heads, select actions.
+    def select_actions(cls, heads_logits, masks):
+        """From all heads, select actions."""
         action_dict = {}
         # First select the high-level action.
-        action_dict['enum'] = cls.sample_action(head_prob_dict['enum'])
+        action_dict['enum'] = cls.sample_action(heads_logits['enum'], mask=masks['enum'])
 
         if action_dict['enum'] == 0:  # Nothing
             pass
         elif action_dict['enum'] == 1:  # Move
-            action_dict['x'] = cls.sample_action(head_prob_dict['x'])
-            action_dict['y'] = cls.sample_action(head_prob_dict['y'])
+            action_dict['x'] = cls.sample_action(heads_logits['x'], mask=masks['x'])
+            action_dict['y'] = cls.sample_action(heads_logits['y'], mask=masks['y'])
         elif action_dict['enum'] == 2:  # Attack
-            action_dict['target_unit'] = cls.sample_action(head_prob_dict['target_unit'])
+            action_dict['target_unit'] = cls.sample_action(heads_logits['target_unit'], mask=masks['target_unit'])
         else:
             ValueError("Invalid Action Selection.")
 
