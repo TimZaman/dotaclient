@@ -618,7 +618,7 @@ class DotaOptimizer:
             if n_selections == 0:
                 entropies[key] = torch.zeros([])
             else:
-                entropies[key] = (probs_sel * log_probs_sel).sum() / n_selections
+                entropies[key] = -(probs_sel * log_probs_sel).sum() / n_selections
 
         # Grab all the policy losses
         policy_loss = torch.cat([v for v in policy_loss.values()])
