@@ -281,8 +281,8 @@ class Player:
         self.use_latest_weights = use_latest_weights
 
         self.policy_inputs = []
-        self.vec_actions = []
-        self.vec_selected_heads_mask = []
+        self.actions = []
+        self.selected_heads_mask = []
         self.rewards = []
         self.hidden = None
         self.drawing = drawing
@@ -340,7 +340,7 @@ class Player:
     @staticmethod
     def pack_policy_inputs(inputs):
         """Convert the list-of-dicts into a dict with a single tensor per input for the sequence."""
-        d = { key: [] for key in Policy.INPUT_KEYS}
+        d = {key: [] for key in Policy.INPUT_KEYS}
         for inp in inputs:  # go over steps: (list of dicts)
             for k, v in inp.items(): # go over each input in the step (dict)
                 d[k].append(v)
@@ -362,6 +362,28 @@ class Player:
                 t[i, ir] = reward[key]
         return t
 
+    @staticmethod
+    def pack_actions(inputs):
+        data = {key: [] for key in Policy.ACTION_OUTPUT_COUNTS.keys()}
+        for inp in inputs:
+            inp = Policy.flatten_selections(inputs=inp)
+            for key in data:
+                data[key].append(inp[key])
+        for k, v in data.items():
+            data[k] = torch.stack(v)
+        return data
+
+    @staticmethod
+    def pack_masks(inputs):
+        data = {key: [] for key in Policy.ACTION_OUTPUT_COUNTS.keys()}
+        for inp in inputs:
+            for key in data:
+                data[key].append(inp[key])
+        for k, v in data.items():
+            # Concatenate over sequence axis and remove batch axis
+            data[k] = torch.cat(v, dim=1).squeeze(0)
+        return data
+
     def _send_experience_rmq(self):
         logger.debug('_send_experience_rmq')
 
@@ -369,8 +391,8 @@ class Player:
         packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
         packed_rewards = self.pack_rewards(inputs=self.rewards)
 
-        actions = torch.stack(self.vec_actions)
-        masks = torch.stack(self.vec_selected_heads_mask)
+        actions = self.pack_actions(self.actions)
+        masks = self.pack_masks(self.selected_heads_mask)
 
         data = pickle.dumps({
             'game_id': self.game_id,
@@ -427,9 +449,9 @@ class Player:
 
         # Reset states.
         self.policy_inputs = []
-        self.vec_actions = []
         self.rewards = []
-        self.vec_selected_heads_mask = []
+        self.actions = []
+        self.selected_heads_mask = []
 
     @staticmethod
     def unit_separation(state, team_id):
@@ -678,9 +700,8 @@ class Player:
         )
 
         self.policy_inputs.append(policy_input)
-        self.vec_actions.append(Policy.flatten_selections(action_dict))
-        self.vec_selected_heads_mask.append(Policy.flatten_head(inputs=selected_heads_mask).view(-1))
-  
+        self.actions.append(action_dict)
+        self.selected_heads_mask.append(selected_heads_mask)
         logger.debug('action:\n' + pformat(action_dict))
 
         action_pb = self.action_to_pb(action_dict=action_dict, state=obs, unit_handles=unit_handles)

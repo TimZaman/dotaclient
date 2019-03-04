@@ -43,7 +43,11 @@ class Policy(nn.Module):
     MOVE_ENUMS *= MAX_MOVE_IN_OBS / (N_MOVE_ENUMS - 1) * 2
     OBSERVATIONS_PER_SECOND = TICKS_PER_SECOND / TICKS_PER_OBSERVATION
     MAX_UNITS = 1+5+16+16+1+1
+    OUTPUT_KEYS = ['enum', 'x', 'y', 'target_unit']
     ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': MAX_UNITS}
+    INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes',
+                  'allied_towers', 'enemy_towers']
+
 
     def __init__(self):
         super().__init__()
@@ -83,9 +87,6 @@ class Policy(nn.Module):
         for k in kwargs:
             kwargs[k] = kwargs[k].unsqueeze(0)
         return self.__call__(**kwargs, hidden=hidden)
-
-    INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes',
-                  'allied_towers', 'enemy_towers']
 
     def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes,
                 allied_towers, enemy_towers, hidden):
@@ -178,14 +179,13 @@ class Policy(nn.Module):
 
     @classmethod
     def flatten_selections(cls, inputs):
-        """Flatten a dict with a (n-multi)action selection(s) into a 'n-hot' 1D tensor"""
-        t = torch.zeros(sum(cls.ACTION_OUTPUT_COUNTS.values()), dtype=torch.uint8)
-        i = 0
-        for key, val in cls.ACTION_OUTPUT_COUNTS.items():
+        d = {}
+        for key, count in cls.ACTION_OUTPUT_COUNTS.items():
+            t = torch.zeros(count, dtype=torch.uint8)
             if key in inputs:
-                t[i + inputs[key]] = 1
-            i += val
-        return t
+                t[inputs[key]] = 1
+            d[key] = t
+        return d
 
     @staticmethod
     def flatten_head(inputs, dim=2):
