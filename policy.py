@@ -140,7 +140,7 @@ class Policy(nn.Module):
         # x = self.ln(x)
 
         # LSTM
-        x, hidden = self.rnn(x, hidden)  # (b, s, n)
+        x, hidden = self.rnn(x, None)  # (b, s, n)  # TODO(tzaman): HACK: FIX ME!
 
         # Unit attention.
         unit_attention = self.affine_unit_attention(x)  # (b, s, n)
@@ -224,7 +224,7 @@ class Policy(nn.Module):
         return torch.cat([enumh, xh, yh, target_unith], dim=1)
 
     @classmethod
-    def sample_action(cls, logits, mask)#, espilon=0.15):
+    def sample_action(cls, logits, mask, espilon=0.15):
         # TODO(tzaman): Have the sampler kind be user-configurable.
         # NOTE(tzaman): Epsilon-greedy is terrible e.g. in cases where the prob is every evenly
         # divided over choices: it will totally offset to one choice (e.g. esp with movement x or y).
