@@ -224,21 +224,21 @@ class Policy(nn.Module):
         return torch.cat([enumh, xh, yh, target_unith], dim=1)
 
     @classmethod
-    def sample_action(cls, logits, mask, espilon=0.15):
+    def sample_action(cls, logits, mask)#, espilon=0.15):
         # TODO(tzaman): Have the sampler kind be user-configurable.
         # NOTE(tzaman): Epsilon-greedy is terrible e.g. in cases where the prob is every evenly
         # divided over choices: it will totally offset to one choice (e.g. esp with movement x or y).
 
-        # Below is episilon-random-uniform-stocastic
-        if torch.rand(1) < espilon:
-            # `torch.multinomial` samples based on weights, so using the mask is already evenly
-            # distributing the probabilities of all viable actions.
-            sample = torch.multinomial(mask[-1].float(), num_samples=1)
-            return sample
-        else:
-            log_probs = cls.masked_softmax(logits=logits, mask=mask)
-            sample = MaskedCategorical(log_probs=log_probs, mask=mask).sample()
-            return sample
+        # # Below is episilon-random-uniform-stocastic
+        # if torch.rand(1) < espilon:
+        #     # `torch.multinomial` samples based on weights, so using the mask is already evenly
+        #     # distributing the probabilities of all viable actions.
+        #     sample = torch.multinomial(mask[-1].float(), num_samples=1)
+        #     return sample
+        # else:
+        log_probs = cls.masked_softmax(logits=logits, mask=mask)
+        sample = MaskedCategorical(log_probs=log_probs, mask=mask).sample()
+        return sample
 
     @classmethod
     def select_actions(cls, heads_logits, masks):
