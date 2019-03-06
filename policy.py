@@ -64,7 +64,8 @@ class Policy(nn.Module):
         self.affine_unit_eth = nn.Linear(128, 128)
 
         self.affine_pre_rnn = nn.Linear(896, 256)
-        self.rnn = nn.LSTM(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
+        # self.rnn = nn.LSTM(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
+        self.fake_rnn = nn.Linear(256, 256)
 
         # self.ln = nn.LayerNorm(128)
 
@@ -140,7 +141,8 @@ class Policy(nn.Module):
         # x = self.ln(x)
 
         # LSTM
-        x, hidden = self.rnn(x, None)  # (b, s, n)  # TODO(tzaman): HACK: FIX ME!
+        # x, hidden = self.rnn(x, hidden)  # (b, s, n)  # TODO(tzaman): HACK: FIX ME!
+        x = self.fake_rnn(x)
 
         # Unit attention.
         unit_attention = self.affine_unit_attention(x)  # (b, s, n)
