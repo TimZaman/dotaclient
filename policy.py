@@ -270,9 +270,14 @@ class Policy(nn.Module):
         return masks
 
     @classmethod
-    def action_masks(cls, unit_handles):
+    def action_masks(cls, player_unit, unit_handles):
         """Mask the head with possible actions."""
-        # Mark your own unit as invalid
+        if not player_unit.is_alive:
+            # Dead player means it can only do the NoOp.
+            masks = {key: torch.zeros(1, 1, val).byte() for key, val in cls.ACTION_OUTPUT_COUNTS.items()}
+            masks['enum'][0, 0, 0] = 1
+            return masks
+
         masks = {key: torch.ones(1, 1, val).byte() for key, val in cls.ACTION_OUTPUT_COUNTS.items()}
         valid_units = unit_handles != -1
         valid_units[0] = 0 # The 'self' hero can never be targetted.

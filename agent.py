@@ -644,7 +644,7 @@ class Player:
         logger.debug('value={}'.format(value))
 
         # Get valid actions. This mask contains all viable actions.
-        action_masks = Policy.action_masks(unit_handles=unit_handles)
+        action_masks = Policy.action_masks(player_unit=hero_unit, unit_handles=unit_handles)
         logger.debug('action_masks:\n' + pformat(action_masks))
 
         # From the heads logits and their masks, select the actions.
