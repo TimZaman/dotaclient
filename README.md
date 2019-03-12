@@ -4,8 +4,8 @@
 
 DotaClient is a reinforcement learning system to train RL agents to play Dota 2 through self-play.
 
-Video: [(Youtube) 1v1 self play, 9 Mar 2019, uses fountain for regen!](https://www.youtube.com/watch?v=hxitG142gsY).
-Video: [(Youtube) 1v1 self play, 29 jan 2019](https://www.youtube.com/watch?v=6vgStVonDdA).
+* Video: [(Youtube) 1v1 self play, 9 Mar 2019, uses fountain for regen!](https://www.youtube.com/watch?v=hxitG142gsY).
+* Video: [(Youtube) 1v1 self play, 29 jan 2019](https://www.youtube.com/watch?v=6vgStVonDdA).
 
 This is built upon the [DotaService](https://github.com/TimZaman/DotaService) project, that exposes the game of Dota2 as a (grpc) service for synchronous play.
 

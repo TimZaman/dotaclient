@@ -338,7 +338,7 @@ class Player:
 
 
     @staticmethod
-    def pack_policy_inputs(inputs):
+    def pack_observations(inputs):
         """Convert the list-of-dicts into a dict with a single tensor per input for the sequence."""
         d = {key: [] for key in Policy.INPUT_KEYS}
         for inp in inputs:  # go over steps: (list of dicts)
@@ -388,20 +388,19 @@ class Player:
         logger.debug('_send_experience_rmq')
 
         # Pack all the policy inputs into dense tensors
-        packed_policy_inputs = self.pack_policy_inputs(inputs=self.policy_inputs)
-        packed_rewards = self.pack_rewards(inputs=self.rewards)
-
-        actions = self.pack_actions(self.actions)
+        observations = self.pack_observations(inputs=self.policy_inputs)
         masks = self.pack_masks(self.selected_heads_mask)
+        actions = self.pack_actions(self.actions)
+        rewards = self.pack_rewards(inputs=self.rewards)
 
         data = pickle.dumps({
             'game_id': self.game_id,
             'team_id': self.team_id,
             'player_id': self.player_id,
-            'states': packed_policy_inputs,
-            'actions': actions,
+            'observations': observations,
             'masks': masks,
-            'rewards': packed_rewards,
+            'actions': actions,
+            'rewards': rewards,
             'weight_version': self.policy.weight_version,
             'canvas': self.drawing.canvas,
         })
