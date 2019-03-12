@@ -50,7 +50,17 @@ def is_master():
 
 
 def discount(x, gamma):
-    return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1].astype(np.float32)
+    return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+
+
+def advantage_returns(rewards, values, gamma, lam):
+    """Compute the advantage and returns from rewards and values."""
+    # GAE-Lambda advantage calculation.
+    deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
+    advantages = discount(deltas, gamma * lam)
+    # Compute rewards-to-go (targets for the value function).
+    returns = discount(rewards, gamma)[:-1]
+    return advantages, returns
 
 
 class MessageQueue:
@@ -349,7 +359,7 @@ class DotaOptimizer:
         actions = data['actions']
         masks = data['masks']  # selected heads mask
         rewards = data['rewards']
-        states = data['states']
+        states = data['observations']
         team_id = data['team_id']
 
         # If applicable, pad the rollout so we can cut into distinct sequences.
