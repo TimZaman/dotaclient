@@ -284,7 +284,6 @@ class Player:
         self.actions = []
         self.selected_heads_mask = []
         self.rewards = []
-        self.hidden = None
         self.drawing = drawing
         self.validation = validation
 
@@ -306,6 +305,7 @@ class Player:
             self.policy.load_state_dict(state_dict, strict=True)
             self.policy.weight_version = version
             self.policy.eval()  # Set to evaluation mode.
+        self.hidden = self.policy.init_hidden()
 
         logger.info('Player {} using weights version {}'.format(
             self.player_id, self.policy.weight_version))
@@ -356,7 +356,7 @@ class Player:
     @staticmethod
     def pack_rewards(inputs):
         """Pack a list or reward dicts into a dense 2D tensor"""
-        t = np.zeros([len(inputs), len(REWARD_KEYS)])
+        t = np.zeros([len(inputs), len(REWARD_KEYS)], dtype=np.float32)
         for i, reward in enumerate(inputs):
             for ir, key in enumerate(REWARD_KEYS):
                 t[i, ir] = reward[key]
@@ -397,12 +397,12 @@ class Player:
             'game_id': self.game_id,
             'team_id': self.team_id,
             'player_id': self.player_id,
+            'weight_version': self.policy.weight_version,
+            'canvas': self.drawing.canvas,
             'observations': observations,
             'masks': masks,
             'actions': actions,
             'rewards': rewards,
-            'weight_version': self.policy.weight_version,
-            'canvas': self.drawing.canvas,
         })
         self.experience_channel.basic_publish(
             exchange='', routing_key=EXPERIENCE_QUEUE_NAME, body=data)

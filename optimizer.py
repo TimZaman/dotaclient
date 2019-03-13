@@ -17,7 +17,7 @@ from google.cloud import storage
 from tensorboardX import SummaryWriter
 import numpy as np
 import pika
-import scipy.signal
+from scipy.signal import lfilter
 import torch
 import torch.distributed as dist
 
@@ -50,7 +50,7 @@ def is_master():
 
 
 def discount(x, gamma):
-    return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+    return lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1].astype(np.float32)
 
 
 def advantage_returns(rewards, values, gamma, lam):
@@ -173,41 +173,20 @@ class MessageQueue:
             self._conn.close()
 
 class Sequence:
-    def __init__(self, game_id, states, actions, masks, rewards, discounted_rewards, weight_version, team_id):
+    def __init__(self, game_id, weight_version, team_id, observations, actions, masks, values, rewards, hidden, log_probs_sel):
         self.game_id = game_id
-        self.states = states
+        self.weight_version = weight_version
+        self.team_id = team_id
+        self.observations = observations
         self.actions = actions
         self.masks = masks
         self.rewards = rewards
-        self.weight_version = weight_version
-        self.team_id = team_id
-
-        # Create a vector with the n-hot mask of actions.
-        # self.vec_action_mask = self.actions.view(-1).detach()
-        # self.vec_head_mask = self.masks.detach()
-
-        # Count the amount of (multi-head) actions taken for each step.
-        # action_sum_per_step = torch.sum(self.actions, dim=1).view(-1).data.numpy()
-        self.discounted_rewards = np.ravel(discounted_rewards)  # flat view
-        # Repeat the rewards where a step has multiple actions, the reward gets repeated.
-        # self.vec_mh_rewards = torch.from_numpy(np.repeat(self.discounted_rewards, action_sum_per_step))
-
-    def calculate_normalized_rewards(self, mean, std):
-        self.norm_discounted_rewards = torch.from_numpy(self.discounted_rewards - mean) / (std + eps)
-
-    # def calculate_old_probs(self, policy):
-    #     head_logits_dict, _, _ = policy.sequence(**self.states, hidden=None)
-    #     mask_dict = Policy.unpack_heads(self.masks)
-    #     # Perform a masked softmax
-    #     head_prob_dict = {}
-    #     for key in head_logits_dict:
-    #         head_prob_dict[key] = Policy.masked_softmax(x=head_logits_dict[key], mask=mask_dict[key])
-
-    #     vec_probs_all = policy.flatten_head(head_prob_dict).view(-1)
-
-    #     # Now mask the probs by the selection
-    #     self.vec_old_probs = torch.masked_select(input=vec_probs_all, mask=self.vec_action_mask)
-    #     self.vec_old_probs = self.vec_old_probs.detach()
+        self.values = values
+        self.hidden = hidden
+        self.log_probs_sel = log_probs_sel
+        # Below are to be assigned later.
+        self.advantages = None
+        self.returns = None
 
 
 def all_gather(t):
@@ -225,15 +204,14 @@ class DotaOptimizer:
     MAX_GRAD_NORM = 0.5
     SPEED_KEY = 'steps per s'
 
-    def __init__(self, rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len,
+    def __init__(self, rmq_host, rmq_port, epochs, min_seq_per_epoch, seq_len,
                  learning_rate, checkpoint, pretrained_model, mq_prefetch_count, log_dir,
                  entropy_coef, vf_coef, run_local):
         super().__init__()
         self.rmq_host = rmq_host
         self.rmq_port = rmq_port
         self.epochs = epochs
-        self.seq_per_epoch = seq_per_epoch
-        self.batch_size = batch_size
+        self.min_seq_per_epoch = min_seq_per_epoch
         self.seq_len = seq_len
         self.learning_rate = learning_rate
         self.checkpoint = checkpoint
@@ -355,80 +333,108 @@ class DotaOptimizer:
     def experiences_from_rollout(self, data):
         # TODO(tzaman): The rollout can consist out of multiple viable sequences.
         # These should be padded and then sliced into separate experiences.
-
+        observations = data['observations']
+        masks = data['masks']
         actions = data['actions']
-        masks = data['masks']  # selected heads mask
         rewards = data['rewards']
-        states = data['observations']
-        team_id = data['team_id']
 
-        # If applicable, pad the rollout so we can cut into distinct sequences.
         rollout_len = data['rewards'].shape[0]
-        pad = rollout_len % self.seq_len
-        pad = 0 if pad == 0 else self.seq_len - pad
-        n_sequences = rollout_len // self.seq_len if pad == 0 else rollout_len // self.seq_len + 1
+        logger.debug('rollout_len={}'.format(rollout_len))
 
-        logger.debug('rollout_len={}, pad={}, n_sequences={}'.format(rollout_len, pad, n_sequences))
+        start = time.time()
 
-        if pad != 0:
-            dim_pad = {
-                1: (0, pad),
-                2: (0, 0, 0, pad),
-                3: (0, 0, 0, 0, 0, pad),
-            }
-            for key, val in actions.items():
-                actions[key] = torch.nn.functional.pad(val, pad=dim_pad[val.dim()], mode='constant', value=0)
-
-            for key, val in masks.items():
-                masks[key] = torch.nn.functional.pad(val, pad=dim_pad[val.dim()], mode='constant', value=0)
-
-            rewards = np.pad(rewards, ((0, pad), (0, 0)), mode='constant')
-
-            for key in states:
-                states[key] = torch.nn.functional.pad(states[key], dim_pad[states[key].dim()], mode='constant', value=0)
-
-        # The advantage needs to be calculated here, in order to get information from the full
-        # rollout.
-        discounted_rewards = discount(x=np.sum(rewards, axis=1), gamma=0.98)
-
-        self.update_running_mean_std(x=discounted_rewards, team_id=team_id)
-
-        # Slice the rollout into distinct sequences.
         sequences = []
-        for s in range(n_sequences):
-            start = s * self.seq_len
-            end = start + self.seq_len
-            logger.debug('Slicing sequence {} from [{}:{}]'.format(s, start, end))
+        hidden = self.policy.init_hidden()
+        values = []
+        rewards_sum = []
+        slice_indices = range(0, rollout_len, self.seq_len)
+        for i1 in slice_indices:
+            pad = 0
+            # Check if this slice requires padding.
+            if rollout_len - i1 < self.seq_len:
+                pad = self.seq_len - (rollout_len - i1)
+            i2 = i1 + self.seq_len - pad
+            logger.debug('Slice[{}:{}], pad={}'.format(i1, i2, pad))
 
-            sliced_states = {key: None for key in Policy.INPUT_KEYS}
-            for key in sliced_states:
-                sliced_states[key] = states[key][start:end, :].detach()
+            # Slice out the relevant parts.
+            s_observations = {}
+            for key, val in observations.items():
+                s_observations[key] = val[i1:i2, :]
 
-            sliced_actions = {}
-            for key, val in actions.items():
-                sliced_actions[key] = actions[key][start:end, :].detach()
-
-            sliced_masks = {}
+            s_masks = {}
             for key, val in masks.items():
-                sliced_masks[key] = masks[key][start:end, :].detach()
+                s_masks[key] = val[i1:i2, :]
+
+            s_actions = {}
+            for key, val in actions.items():
+                s_actions[key] = val[i1:i2, :]
+
+            s_rewards = rewards[i1:i2]
+
+            if pad:
+                dim_pad = {
+                    1: (0, pad),
+                    2: (0, 0, 0, pad),
+                    3: (0, 0, 0, 0, 0, pad),
+                }
+                for key, val in s_observations.items():
+                    s_observations[key] = torch.nn.functional.pad(val, dim_pad[val.dim()], mode='constant', value=0).detach()
+
+                for key, val in s_masks.items():
+                    s_masks[key] = torch.nn.functional.pad(val, pad=dim_pad[val.dim()], mode='constant', value=0).detach()
+
+                for key, val in s_actions.items():
+                    s_actions[key] = torch.nn.functional.pad(val, pad=dim_pad[val.dim()], mode='constant', value=0).detach()
+
+                s_rewards = np.pad(s_rewards, ((0, pad), (0, 0)), mode='constant')
+
+            input_hidden = hidden
+            head_logits_dict, s_values, hidden = self.policy.sequence(**s_observations, hidden=input_hidden)
+
+            log_probs_sel = {}
+            for key in head_logits_dict:
+                # TODO(tzaman): USE FOR PPO
+                log_probs = Policy.masked_softmax(logits=head_logits_dict[key], mask=s_masks[key].unsqueeze(0))
+                log_probs_sel[key] = torch.masked_select(input=log_probs, mask=s_actions[key]).detach()
+
+            # The values and rewards are gathered here over all sequences, because the values are
+            # cumulative, and therefore need the first step from each next sequence. To optimize this,
+            # we gather them here, and process these after the loop, and add them to the Sequence
+            # object later.
+            values.append(s_values)
+            rewards_sum.append(np.sum(s_rewards, axis=1).ravel())
 
             sequence = Sequence(
                 game_id=data['game_id'],
-                states=sliced_states,
-                actions=sliced_actions,
-                masks=sliced_masks,
-                rewards=rewards[start:end, :],
-                discounted_rewards=discounted_rewards[start:end],
                 weight_version=data['weight_version'],
                 team_id=data['team_id'],
+                observations=s_observations,
+                actions=s_actions,
+                masks=s_masks,
+                values=s_values.detach(),
+                rewards=s_rewards,
+                hidden=input_hidden.detach(),
+                log_probs_sel=log_probs_sel,
             )
-            # Normalize the processed discounted rewards
-            sequence.calculate_normalized_rewards(mean=self.running_mean[team_id],
-                                                  std=self.running_std[team_id])
-
-            # Finally, get the probabilties with the current policy.
-            # sequence.calculate_old_probs(policy=self.policy_old)
             sequences.append(sequence)
+
+        # TODO(tzaman): For now, we assume we are always presented with full and terminated sequences.
+        # This is why we append a zero here, so the advantage and return computation works efficiently.
+        # In the future, if we support receiving non-terminated sequences, we need one more state and
+        # reward than we have action.
+        values = torch.cat(values).numpy().ravel()
+        values = np.append(values, np.array(0., dtype=np.float32))
+        rewards_sum = np.concatenate(rewards_sum)
+        rewards_sum = np.append(rewards_sum, np.array(0., dtype=np.float32))
+        advantages, returns = advantage_returns(rewards=rewards_sum, values=values, gamma=0.98, lam=0.97)
+
+        # Split the advantages and returns back up into their respective sequences.
+        advantages = np.split(advantages, len(sequences))
+        returns = np.split(returns, len(sequences))
+        for s, a, r in zip(sequences, advantages, returns):
+            s.advantages = torch.from_numpy(a)
+            s.returns = torch.from_numpy(r)
+
         return sequences
 
     @staticmethod
@@ -436,9 +442,6 @@ class DotaOptimizer:
         return {k: torch.stack([d[k] for d in x]) for k in x[0]}
 
     def run(self):
-        assert self.seq_per_epoch >= self.batch_size
-        assert self.seq_per_epoch % self.batch_size == 0
-
         for it in range(self.iteration_start, self.iterations):
             logger.info('iteration {}/{}'.format(it, self.iterations))
 
@@ -448,8 +451,8 @@ class DotaOptimizer:
             rollout_lens = []
             weight_ages = []
             canvas = None  # Just save only the last canvas.
-            while len(experiences) < self.seq_per_epoch:  # TODO(tzaman): with this approach, we often grab too many sequences!
-                # logger.debug(' adding experience @{}/{}'.format(len(experiences), self.seq_per_epoch))
+            while len(experiences) < self.min_seq_per_epoch:
+                logger.debug(' adding experience @{}/{}'.format(len(experiences), self.min_seq_per_epoch))
 
                 # Get new experiences from a new rollout.
                 with torch.no_grad():
@@ -464,33 +467,25 @@ class DotaOptimizer:
 
             losses = []
             entropies = []
-            advantages = []
+            grad_norms = []
             for ep in range(self.epochs):
                 logger.info(' epoch {}/{}'.format(ep + 1, self.epochs))
                 self.mq.process_data_events()
+                loss_d, entropy_d, grad_norm_d = self.train(experiences=experiences)
+                losses.append(loss_d)
+                entropies.append(entropy_d)
+                grad_norms.append(grad_norm_d)
 
-                # Shuffle the list of experience chunks.
-                random.shuffle(experiences)
-
-                # Divide into batches
-                batches = [experiences[ib:ib + self.batch_size] for ib in range(0, len(experiences), self.batch_size)]
-                for batch in batches:
-                    loss_d, entropy_d, advantage = self.train(experiences=batch)
-                    losses.append(loss_d)
-                    entropies.append(entropy_d)
-                    advantages.append(advantage)
-            
             # Set the new policy as the old one.
             self.policy_old.load_state_dict(self.policy.state_dict())
 
             losses = self.list_of_dicts_to_dict_of_lists(losses)
             loss = losses['loss'].mean()
 
-            advantages = torch.stack(advantages)
-            advantage = advantages.mean()
-
             entropies = self.list_of_dicts_to_dict_of_lists(entropies)
             entropy = torch.stack(list(entropies.values())).sum(dim=0).mean()
+
+            grad_norms = self.list_of_dicts_to_dict_of_lists(grad_norms)
 
             n_steps = len(experiences) * self.seq_len
             steps_per_s = n_steps / (time.time() - self.time_last_step)
@@ -513,9 +508,8 @@ class DotaOptimizer:
                 'loss/sum': loss,
                 'loss/policy': losses['policy_loss'].mean(),
                 'loss/entropy': losses['entropy_loss'].mean(),
-                'loss/advantage': losses['advantage_loss'].mean(),
+                'loss/value': losses['value_loss'].mean(),
                 'entropy': entropy,
-                'advantage': advantage,
                 'avg_rollout_len': avg_rollout_len,
                 'avg_weight_age': avg_weight_age,
             }
@@ -531,11 +525,14 @@ class DotaOptimizer:
             for k, v in entropies.items():
                 metrics['entropy/{}'.format(k)] = v.mean()
 
+            for k, v in grad_norms.items():
+                metrics['grad_norm/{}'.format(k)] = v.mean()
+
             for k, v in reward_dict.items():
                 metrics['reward_per_sec/{}'.format(k)] = v
 
-            logger.info('steps_per_s={:.2f}, avg_weight_age={:.1f}, reward_per_sec={:.4f}, loss={:.4f}, entropy={:.3f}, advantage={:.3f}'.format(
-                steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy), float(advantage)))
+            logger.info('steps_per_s={:.2f}, avg_weight_age={:.1f}, reward_per_sec={:.4f}, loss={:.4f}, entropy={:.3f}'.format(
+                steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy)))
 
             if self.checkpoint:
                 # TODO(tzaman): re-introduce distributed metrics. See commits from december 2017.
@@ -575,10 +572,14 @@ class DotaOptimizer:
     def train(self, experiences):
         # Train on one epoch of data.
         # Experiences is a list of (padded) experience chunks.
-        logger.debug('train(experiences={})'.format(experiences))
+        logger.debug('train(experiences=#{})'.format(len(experiences)))
 
-        # Batch together all experiences.
-        norm_discounted_rewards = torch.stack([e.norm_discounted_rewards for e in experiences])
+        # Stack together all experiences.
+        advantage = torch.stack([e.advantages for e in experiences])
+        advantage = (advantage - advantage.mean()) / (advantage.std() + eps)
+        advantage = advantage.detach()
+        returns = torch.stack([e.returns for e in experiences]).detach()
+        hidden = torch.cat([e.hidden for e in experiences], dim=1).detach()
 
         # The action mask contains the mask of the selected actions
         actions = {key: [] for key in Policy.OUTPUT_KEYS}
@@ -594,30 +595,26 @@ class DotaOptimizer:
         for e in experiences:
             for key, val in e.masks.items():
                 masks[key].append(val)
-        for key in masks:
-            masks[key] = torch.stack(masks[key])
+        for key, val in masks.items():
+            masks[key] = torch.stack(val)
 
-        # vec_old_probs = torch.cat([e.vec_old_probs for e in experiences])
-
-        states = {key: [] for key in Policy.INPUT_KEYS}
+        observations = {key: [] for key in Policy.INPUT_KEYS}
         for e in experiences:
-            for key in e.states:
-                states[key].append(e.states[key])
-        states = {key: torch.stack(states[key]) for key in states}
+            for key, val in e.observations.items():
+                observations[key].append(val)
+        for key, val in observations.items():
+            observations[key] = torch.stack(val)
 
         # Notice there is no notion of loss masking here, this is unnessecary as we only work
         # use selected probabilties. E.g. when things were padded, nothing was selected, so no data.
-        head_logits_dict, values, _ = self.policy(**states, hidden=None)  # -> {heads: tensors}
-
-        # Advantage
-        advantage = values - torch.from_numpy(e.discounted_rewards)
+        head_logits_dict, values, _ = self.policy(**observations, hidden=hidden)
 
         # Perform a masked softmax
         policy_loss = {}
         entropies = {}
         for key in head_logits_dict:
             log_probs = Policy.masked_softmax(logits=head_logits_dict[key], mask=masks[key])
-            head_policy_loss = -log_probs * norm_discounted_rewards.unsqueeze(-1)
+            head_policy_loss = -log_probs * advantage.unsqueeze(-1)
             head_policy_loss_sel = torch.masked_select(input=head_policy_loss, mask=actions[key])
             policy_loss[key] = head_policy_loss_sel
 
@@ -634,40 +631,6 @@ class DotaOptimizer:
         policy_loss = torch.cat([v for v in policy_loss.values()])
         policy_loss = policy_loss.mean()
 
-        # vec_log_probs_all = Policy.flatten_head(inputs=head_log_prob_dict).view(-1)
-
-        # Now mask the probs by the selection
-        # vec_selected_log_probs = torch.masked_select(input=vec_log_probs_all, mask=vec_action_mask)
-
-        # # PPO
-        # # Probability ratio
-        # rt = vec_selected_probs / (vec_old_probs + eps)
-
-        # # PPO Objective
-        # surr1 = rt * vec_mh_rewards_norm
-        # surr2 = torch.clamp(rt, min=1.0 - self.e_clip, max=1.0 + self.e_clip) * vec_mh_rewards_norm
-        # policy_loss = -torch.min(surr1, surr2).mean()  # This way, a positive reward will always lead to a negative loss
-
-        # VPO
-        # policy_loss = -vec_selected_log_probs * vec_mh_rewards_norm
-        # policy_loss = policy_loss.mean()
-
-        # # Check the entropy per head.
-        # entropies = {}
-        # for key in head_logits_dict:
-        #     entropies[key] = torch.zeros([])
-        #     # logp = head_log_prob_dict[key].clone()
-        #     # logp[~mask_dict[key]] = 0.
-        #     # p = torch.exp(logp).clone()
-        #     # p[~mask_dict[key]] = 0.
-        #     # e = p * logp
-        #     # e = e.sum(dim=2)
-        #     # e = e[e != 0]
-        #     # if e.size(0) == 0:
-        #     #     # When no action of this kind was chosen.
-        #     #     e = torch.zeros([])
-        #     # entropies[key] = -e.mean()
-
         if self.entropy_coef > 0:
             entropy = torch.stack(list(entropies.values())).sum()
             entropy_loss = -self.entropy_coef * entropy
@@ -675,28 +638,43 @@ class DotaOptimizer:
             entropy_loss = torch.tensor(0.)
 
         if self.vf_coef > 0:
-            advantage_loss = self.vf_coef * (advantage.pow(2)).mean()
+            # Notice we don't have to remove zero-padded entries, as they give 0 loss.
+            value_loss = 0.5 * (returns - values.squeeze(-1)).pow(2).mean()
+            value_loss = self.vf_coef * value_loss
         else:
-            advantage_loss = torch.tensor(0.)
+            value_loss = torch.tensor(0.)
 
-        loss = policy_loss + entropy_loss + advantage_loss
+        loss = policy_loss + entropy_loss + value_loss
 
         if torch.isnan(loss):
-            raise ValueError('loss={}, policy_loss={}, entropy_loss={}, advantage_loss={}'.format(
-                loss, policy_loss, entropy_loss, advantage_loss))
+            raise ValueError('loss={}, policy_loss={}, entropy_loss={}, value_loss={}'.format(
+                loss, policy_loss, entropy_loss, value_loss))
 
         self.optimizer.zero_grad()
         loss.backward()
+
+        grad_norm = self.mean_gradient_norm()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.MAX_GRAD_NORM)
+        grad_norm_clipped = self.mean_gradient_norm()
+
+        if torch.isnan(grad_norm):
+            raise ValueError('grad_norm={}'.format(grad_norm))
+
         self.optimizer.step()
         losses = {
             'loss': loss,
             'policy_loss': policy_loss,
             'entropy_loss': entropy_loss,
-            'advantage_loss': advantage_loss,
+            'value_loss': value_loss,
         }
-        return losses, entropies, advantage.mean()
 
+        return losses, entropies, {'unclipped': grad_norm, 'clipped': grad_norm_clipped}
+
+    def mean_gradient_norm(self):
+        gs = []
+        for p in list(filter(lambda p: p.grad is not None, self.policy.parameters())):
+            gs.append(p.grad.data.norm(2))
+        return torch.stack(gs).mean()
 
     def upload_model(self, version):
         if not is_master():
@@ -736,11 +714,11 @@ def init_distribution(backend='gloo'):
     logger.info("Distribution initialized.")
 
 
-def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate,
+def main(rmq_host, rmq_port, epochs, min_seq_per_epoch, seq_len, learning_rate,
          pretrained_model, mq_prefetch_count, log_dir, entropy_coef, vf_coef, run_local):
-    logger.info('main(rmq_host={}, rmq_port={}, epochs={} seq_per_epoch={}, batch_size={},'
-                ' seq_len={} learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={}, vf_coef={})'.format(
-        rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
+    logger.info('main(rmq_host={}, rmq_port={}, epochs={}, min_seq_per_epoch={},'
+                ' seq_len={}, learning_rate={}, pretrained_model={}, mq_prefetch_count={}, entropy_coef={}, vf_coef={})'.format(
+        rmq_host, rmq_port, epochs, min_seq_per_epoch, seq_len, learning_rate, pretrained_model, mq_prefetch_count,
         entropy_coef, vf_coef))
 
     # If applicable, initialize distributed training.
@@ -756,8 +734,7 @@ def main(rmq_host, rmq_port, epochs, seq_per_epoch, batch_size, seq_len, learnin
         rmq_host=rmq_host,
         rmq_port=rmq_port,
         epochs=epochs,
-        seq_per_epoch=seq_per_epoch,
-        batch_size=batch_size,
+        min_seq_per_epoch=min_seq_per_epoch,
         seq_len=seq_len,
         learning_rate=learning_rate,
         checkpoint=checkpoint,
@@ -782,15 +759,16 @@ if __name__ == '__main__':
     parser.add_argument("--ip", type=str, help="mq ip", default='127.0.0.1')
     parser.add_argument("--port", type=int, help="mq port", default=5672)
     parser.add_argument("--epochs", type=int, help="amount of epochs", default=4)
-    parser.add_argument("--seq-per-epoch", type=int, help="amount of sequences per epoch", default=16)
-    parser.add_argument("--batch-size", type=int, help="batch size", default=4)
-    parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)", default=256)
-    parser.add_argument("--learning-rate", type=float, help="learning rate", default=1e-4)
-    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=0.01)
+    parser.add_argument("--min-seq-per-epoch", type=int, help="minimum amount of sequences per epoch."
+        "This can be slightly more because we want to process full rollouts.", default=1024)
+    parser.add_argument("--seq-len", type=int, help="sequence length (as one sample in a minibatch)."
+        "This is also the length that will be (truncated) backpropped into.", default=16)
+    parser.add_argument("--learning-rate", type=float, help="learning rate", default=5e-5)
+    parser.add_argument("--entropy-coef", type=float, help="entropy coef (as proportional addition to the loss)", default=5e-4)
     parser.add_argument("--vf-coef", type=float, help="value fn coef (as proportional addition to the loss)", default=0.5)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
-                        help="amount of experience messages to prefetch from mq", default=4)
+                        help="amount of experience messages to prefetch from mq", default=8)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
     parser.add_argument("--run-local", type=bool, help="set to true to run locally (not using GCP)", default=False)
@@ -804,8 +782,7 @@ if __name__ == '__main__':
             rmq_host=args.ip,
             rmq_port=args.port,
             epochs=args.epochs,
-            seq_per_epoch=args.seq_per_epoch,
-            batch_size=args.batch_size,
+            min_seq_per_epoch=args.min_seq_per_epoch,
             seq_len=args.seq_len,
             learning_rate=args.learning_rate,
             pretrained_model=args.pretrained_model,

@@ -48,7 +48,6 @@ class Policy(nn.Module):
     INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes',
                   'allied_towers', 'enemy_towers']
 
-
     def __init__(self):
         super().__init__()
 
@@ -64,8 +63,7 @@ class Policy(nn.Module):
         self.affine_unit_eth = nn.Linear(128, 128)
 
         self.affine_pre_rnn = nn.Linear(896, 256)
-        # self.rnn = nn.LSTM(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
-        self.fake_rnn = nn.Linear(256, 256)
+        self.rnn = nn.GRU(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
 
         # self.ln = nn.LayerNorm(128)
 
@@ -76,6 +74,9 @@ class Policy(nn.Module):
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
         self.affine_unit_attention = nn.Linear(256, 128)
         self.affine_value = nn.Linear(256, 1)
+
+    def init_hidden(self):
+        return torch.zeros([1, 1, 256], dtype=torch.float32)
 
     def single(self, hidden, **kwargs):
         """Inputs a single element of a sequence."""
@@ -131,18 +132,14 @@ class Policy(nn.Module):
                                     eth_embedding), dim=2)  # (b, s, units, n)
         unit_embedding = torch.transpose(unit_embedding, dim0=3, dim1=2)  # (b, s, units, n) -> (b, s, n, units)
 
-        # Combine for LSTM.
+        # Combine for RNN.
         x = torch.cat((env, ah_embedding_max, eh_embedding_max, anh_embedding_max, enh_embedding_max,
                        ath_embedding_max, eth_embedding_max), dim=2)  # (b, s, n)
 
         x = F.relu(self.affine_pre_rnn(x))  # (b, s, n)
 
-        # TODO(tzaman) Maybe add parameter noise here.
-        # x = self.ln(x)
-
-        # LSTM
-        # x, hidden = self.rnn(x, hidden)  # (b, s, n)  # TODO(tzaman): HACK: FIX ME!
-        x = self.fake_rnn(x)
+        # RNN
+        x, hidden = self.rnn(x, hidden)  # (b, s, n)
 
         # Unit attention.
         unit_attention = self.affine_unit_attention(x)  # (b, s, n)
