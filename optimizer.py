@@ -37,6 +37,7 @@ np.random.seed(7)
 
 eps = np.finfo(np.float32).eps.item()
 
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 def is_distributed():
     return torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -264,7 +265,7 @@ class DotaOptimizer:
         else:
             self.policy = self.policy_base
 
-        self.policy_old = copy.deepcopy(self.policy)
+        self.policy.to(device)
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.time_last_step = time.time()
@@ -343,7 +344,7 @@ class DotaOptimizer:
         start = time.time()
 
         sequences = []
-        hidden = self.policy.init_hidden()
+        hidden = self.policy.init_hidden().to(device)
         values = []
         rewards_sum = []
         slice_indices = range(0, rollout_len, self.seq_len)
@@ -358,15 +359,15 @@ class DotaOptimizer:
             # Slice out the relevant parts.
             s_observations = {}
             for key, val in observations.items():
-                s_observations[key] = val[i1:i2, :]
+                s_observations[key] = val[i1:i2, :].to(device)
 
             s_masks = {}
             for key, val in masks.items():
-                s_masks[key] = val[i1:i2, :]
+                s_masks[key] = val[i1:i2, :].to(device)
 
             s_actions = {}
             for key, val in actions.items():
-                s_actions[key] = val[i1:i2, :]
+                s_actions[key] = val[i1:i2, :].to(device)
 
             s_rewards = rewards[i1:i2]
 
@@ -421,7 +422,7 @@ class DotaOptimizer:
         # This is why we append a zero here, so the advantage and return computation works efficiently.
         # In the future, if we support receiving non-terminated sequences, we need one more state and
         # reward than we have action.
-        values = torch.cat(values).numpy().ravel()
+        values = torch.cat(values).cpu().numpy().ravel()
         values = np.append(values, np.array(0., dtype=np.float32))
         rewards_sum = np.concatenate(rewards_sum)
         rewards_sum = np.append(rewards_sum, np.array(0., dtype=np.float32))
@@ -474,9 +475,6 @@ class DotaOptimizer:
                 losses.append(loss_d)
                 entropies.append(entropy_d)
                 grad_norms.append(grad_norm_d)
-
-            # Set the new policy as the old one.
-            self.policy_old.load_state_dict(self.policy.state_dict())
 
             losses = self.list_of_dicts_to_dict_of_lists(losses)
             loss = losses['loss'].mean()
@@ -574,10 +572,10 @@ class DotaOptimizer:
         logger.debug('train(experiences=#{})'.format(len(experiences)))
 
         # Stack together all experiences.
-        advantage = torch.stack([e.advantages for e in experiences])
+        advantage = torch.stack([e.advantages for e in experiences]).to(device)
         advantage = (advantage - advantage.mean()) / (advantage.std() + eps)
         advantage = advantage.detach()
-        returns = torch.stack([e.returns for e in experiences]).detach()
+        returns = torch.stack([e.returns for e in experiences]).detach().to(device)
         hidden = torch.cat([e.hidden for e in experiences], dim=1).detach()
 
         # The action mask contains the mask of the selected actions
