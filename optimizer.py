@@ -156,7 +156,7 @@ class MessageQueue:
             queue=self.EXPERIENCE_QUEUE_NAME,
             no_ack=False,
         ))
-        self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
+        # self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
         return method, properties, body
 
     def consume_xp(self):
@@ -613,22 +613,31 @@ class DotaOptimizer:
         policy_loss = {}
         entropies = {}
         for key in head_logits_dict:
-            log_probs = Policy.masked_softmax(logits=head_logits_dict[key], mask=masks[key])
-            head_policy_loss = -log_probs * advantage.unsqueeze(-1)
-            head_policy_loss_sel = torch.masked_select(input=head_policy_loss, mask=actions[key])
-            policy_loss[key] = head_policy_loss_sel
-
-            n_selections = head_policy_loss_sel.size(0)
-
-            log_probs_sel = torch.masked_select(input=log_probs, mask=masks[key])
-            probs_sel = torch.exp(log_probs_sel)
-            if n_selections == 0:
+            # actions_step contains if we took an action of this key during the respective step
+            actions_step = actions[key].sum(dim=-1) != 0
+            if actions_step.sum() == 0:
+                policy_loss[key] = torch.zeros([])
                 entropies[key] = torch.zeros([])
-            else:
-                entropies[key] = -(probs_sel * log_probs_sel).sum() / n_selections
+                continue
+
+            log_probs = Policy.masked_softmax(logits=head_logits_dict[key], mask=masks[key])
+            log_probs_sel = torch.masked_select(input=log_probs, mask=actions[key])
+            old_log_probs_sel = torch.cat([e.log_probs_sel[key] for e in experiences]).detach()
+            advantage_sel = advantage[actions_step]
+
+            # PPO
+            ratio = torch.exp(log_probs_sel - old_log_probs_sel)
+            surr1 = ratio * advantage_sel.view(-1)
+            surr2 = torch.clamp(ratio, 1.0 - self.e_clip, 1.0 + self.e_clip) * advantage_sel
+            policy_loss[key] = -torch.min(surr1, surr2).mean()
+
+            n_actions = actions_step.sum()  # Amount of actions being taken for this key this batch.
+            log_probs_masked = torch.masked_select(input=log_probs, mask=masks[key])
+            probs_sel_masked = torch.exp(log_probs_masked)
+            entropies[key] = -(probs_sel_masked * log_probs_masked).sum() / n_actions
 
         # Grab all the policy losses
-        policy_loss = torch.cat([v for v in policy_loss.values()])
+        policy_loss = torch.stack([v for v in policy_loss.values()])
         policy_loss = policy_loss.mean()
 
         if self.entropy_coef > 0:
