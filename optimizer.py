@@ -776,7 +776,7 @@ if __name__ == '__main__':
     parser.add_argument("--vf-coef", type=float, help="value fn coef (as proportional addition to the loss)", default=0.5)
     parser.add_argument("--pretrained-model", type=str, help="pretrained model file within gcs bucket", default=None)
     parser.add_argument("--mq-prefetch-count", type=int,
-                        help="amount of experience messages to prefetch from mq", default=8)
+                        help="amount of experience messages to prefetch from mq", default=1)
     parser.add_argument("-l", "--log", dest="log_level", help="Set the logging level",
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], default='INFO')
     parser.add_argument("--run-local", type=bool, help="set to true to run locally (not using GCP)", default=False)
