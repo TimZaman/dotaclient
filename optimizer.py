@@ -156,7 +156,7 @@ class MessageQueue:
             queue=self.EXPERIENCE_QUEUE_NAME,
             no_ack=False,
         ))
-        # self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
+        self._xp_channel.basic_ack(delivery_tag=method.delivery_tag)
         return method, properties, body
 
     def consume_xp(self):
@@ -275,8 +275,7 @@ class DotaOptimizer:
         self.mq.connect()
 
         # Upload initial model before any step is taken, and only if we're not resuming.
-        if self.iteration_start == 1:
-            self.upload_model(version=0)
+        self.upload_model(version=self.iteration_start)
 
 
     @staticmethod
