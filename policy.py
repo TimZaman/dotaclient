@@ -43,8 +43,8 @@ class Policy(nn.Module):
     MOVE_ENUMS *= MAX_MOVE_IN_OBS / (N_MOVE_ENUMS - 1) * 2
     OBSERVATIONS_PER_SECOND = TICKS_PER_SECOND / TICKS_PER_OBSERVATION
     MAX_UNITS = 1+5+16+16+1+1
-    OUTPUT_KEYS = ['enum', 'x', 'y', 'target_unit']
-    ACTION_OUTPUT_COUNTS = {'enum': 3, 'x': 9, 'y': 9, 'target_unit': MAX_UNITS}
+    ACTION_OUTPUT_COUNTS = {'enum': 4, 'x': 9, 'y': 9, 'target_unit': MAX_UNITS, 'ability': 3}
+    OUTPUT_KEYS = ACTION_OUTPUT_COUNTS.keys()
     INPUT_KEYS = ['env', 'allied_heroes', 'enemy_heroes', 'allied_nonheroes', 'enemy_nonheroes',
                   'allied_towers', 'enemy_towers']
 
@@ -53,7 +53,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats = nn.Linear(10, 128)
+        self.affine_unit_basic_stats_v1 = nn.Linear(11, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -65,14 +65,13 @@ class Policy(nn.Module):
         self.affine_pre_rnn = nn.Linear(896, 256)
         self.rnn = nn.GRU(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
 
-        # self.ln = nn.LayerNorm(128)
-
         # Heads
-        self.affine_head_enum = nn.Linear(256, 3)
+        self.affine_head_enum_v1 = nn.Linear(256, 4)
         self.affine_move_x = nn.Linear(256, self.N_MOVE_ENUMS)
         self.affine_move_y = nn.Linear(256, self.N_MOVE_ENUMS)
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
         self.affine_unit_attention = nn.Linear(256, 128)
+        self.affine_head_ability = nn.Linear(256, 3)
         self.affine_value = nn.Linear(256, 1)
 
     def init_hidden(self):
@@ -98,32 +97,32 @@ class Policy(nn.Module):
         env = F.relu(self.affine_env(env))  # (b, s, n)
 
         # Allied Heroes.
-        ah_basic = F.relu(self.affine_unit_basic_stats(allied_heroes))
+        ah_basic = F.relu(self.affine_unit_basic_stats_v1(allied_heroes))
         ah_embedding = self.affine_unit_ah(ah_basic)  # (b, s, units, n)
         ah_embedding_max, _ = torch.max(ah_embedding, dim=2)  # (b, s, n)
 
         # Enemy Heroes.
-        eh_basic = F.relu(self.affine_unit_basic_stats(enemy_heroes))
+        eh_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_heroes))
         eh_embedding = self.affine_unit_eh(eh_basic)  # (b, s, units, n)
         eh_embedding_max, _ = torch.max(eh_embedding, dim=2)  # (b, s, n)
 
         # Allied Non-Heroes.
-        anh_basic = F.relu(self.affine_unit_basic_stats(allied_nonheroes))
+        anh_basic = F.relu(self.affine_unit_basic_stats_v1(allied_nonheroes))
         anh_embedding = self.affine_unit_anh(anh_basic)  # (b, s, units, n)
         anh_embedding_max, _ = torch.max(anh_embedding, dim=2)  # (b, s, n)
 
         # Enemy Non-Heroes.
-        enh_basic = F.relu(self.affine_unit_basic_stats(enemy_nonheroes))
+        enh_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_nonheroes))
         enh_embedding = self.affine_unit_enh(enh_basic)  # (b, s, units, n)
         enh_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
 
         # Allied Towers.
-        ath_basic = F.relu(self.affine_unit_basic_stats(allied_towers))
+        ath_basic = F.relu(self.affine_unit_basic_stats_v1(allied_towers))
         ath_embedding = self.affine_unit_ath(ath_basic)  # (b, s, units, n)
         ath_embedding_max, _ = torch.max(ath_embedding, dim=2)  # (b, s, n)
 
         # Enemy Towers.
-        eth_basic = F.relu(self.affine_unit_basic_stats(enemy_towers))
+        eth_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_towers))
         eth_embedding = self.affine_unit_eth(eth_basic)  # (b, s, units, n)
         eth_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
 
@@ -148,18 +147,20 @@ class Policy(nn.Module):
         # Heads.
         action_scores_x = self.affine_move_x(x)
         action_scores_y = self.affine_move_y(x)
-        action_scores_enum = self.affine_head_enum(x)
+        action_scores_enum = self.affine_head_enum_v1(x)
         # action_delay_enum = self.affine_head_delay(x)
         action_target_unit = torch.matmul(unit_attention, unit_embedding)   # (b, s, 1, n) * (b, s, n, units) = (b, s, 1, units)
         action_target_unit = action_target_unit.squeeze(2)  # (b, s, 1, units) -> (b, s, units)
+        action_ability = self.affine_head_ability(x)
         value = self.affine_value(x)  # (b, s, 1)
 
         d = {
-            'enum': action_scores_enum,  # (b, s, 3)
-            'x': action_scores_x,  # (b, s, 9)
-            'y': action_scores_y,  # (b, s, 9)
+            'enum': action_scores_enum,  # (b, s, n)
+            'x': action_scores_x,  # (b, s, n)
+            'y': action_scores_y,  # (b, s, n)
             # delay=F.softmax(action_delay_enum, dim=2),
-            'target_unit': action_target_unit # (b, s, units)
+            'target_unit': action_target_unit, # (b, s, units)
+            'ability': action_ability, # (b, s, n)
         }
 
         # Return
@@ -186,55 +187,9 @@ class Policy(nn.Module):
             d[key] = t
         return d
 
-    @staticmethod
-    def flatten_head(inputs, dim=2):
-        return torch.cat(list(inputs.values()), dim=dim)
-
-    @staticmethod
-    def unpack_heads(inputs):
-        return {
-            'enum': inputs[..., :3],
-            'x': inputs[..., 3:3+9],
-            'y': inputs[..., 3+9:3+9+9],
-            'target_unit': inputs[..., 3+9+9:],
-        }
-
     @classmethod
-    def flat_actions_to_headmask(cls, inputs):
-        """Takes in flattened selections, then masks out full heads."""
-        # TODO(tzaman): properly store all these magic numbers
-        enum = inputs[:, :3]
-        enumh = enum.any(dim=1, keepdim=True)
-        enumh = enumh.repeat(1, 3)
-
-        x = inputs[:, 3:3+9]
-        xh = x.any(dim=1, keepdim=True)
-        xh = xh.repeat(1, 9)
-
-        y = inputs[:, 3+9:3+9+9]
-        yh = y.any(dim=1, keepdim=True)
-        yh = yh.repeat(1, 9)
-
-        target_unit = inputs[:, 3+9+9:]
-        target_unith = target_unit.any(dim=1, keepdim=True)
-        target_unith = target_unith.repeat(1, cls.MAX_UNITS)
-
-        # Put it back together
-        return torch.cat([enumh, xh, yh, target_unith], dim=1)
-
-    @classmethod
-    def sample_action(cls, logits, mask, espilon=0.15):
+    def sample_action(cls, logits, mask):
         # TODO(tzaman): Have the sampler kind be user-configurable.
-        # NOTE(tzaman): Epsilon-greedy is terrible e.g. in cases where the prob is every evenly
-        # divided over choices: it will totally offset to one choice (e.g. esp with movement x or y).
-
-        # # Below is episilon-random-uniform-stocastic
-        # if torch.rand(1) < espilon:
-        #     # `torch.multinomial` samples based on weights, so using the mask is already evenly
-        #     # distributing the probabilities of all viable actions.
-        #     sample = torch.multinomial(mask[-1].float(), num_samples=1)
-        #     return sample
-        # else:
         log_probs = cls.masked_softmax(logits=logits, mask=mask)
         sample = MaskedCategorical(log_probs=log_probs, mask=mask).sample()
         return sample
@@ -253,6 +208,8 @@ class Policy(nn.Module):
             action_dict['y'] = cls.sample_action(heads_logits['y'], mask=masks['y'])
         elif action_dict['enum'] == 2:  # Attack
             action_dict['target_unit'] = cls.sample_action(heads_logits['target_unit'], mask=masks['target_unit'])
+        elif action_dict['enum'] == 3:  # Ability
+            action_dict['ability'] = cls.sample_action(heads_logits['ability'], mask=masks['ability'])
         else:
             ValueError("Invalid Action Selection.")
 
@@ -283,37 +240,3 @@ class Policy(nn.Module):
             masks['enum'][0, 0, 2] = 0
         masks['target_unit'][0, 0] = valid_units
         return masks
-
-    @staticmethod
-    def mask_heads(head_prob_dict, unit_handles):
-        """Mask the head with possible actions."""
-        # Mark your own unit as invalid
-        invalid_units = unit_handles == -1
-        invalid_units[0] = 1 # The 'self' hero can never be targetted.
-        if invalid_units.all():
-            # All units invalid, so we cannot choose the high-level attack head:
-            head_prob_dict['enum'][0, 0, 2] = 0.
-        head_prob_dict['target_unit'][0, 0, invalid_units] = 0.
-        return head_prob_dict
-
-
-class RndModel(torch.nn.Module):
-
-    def __init__(self, requires_grad):
-        super().__init__()
-        self.affine1 = torch.nn.Linear(10, 64)
-        self.affine2 = torch.nn.Linear(64, 64)
-        self.affine3 = torch.nn.Linear(64, 64)
-        self.affine4 = torch.nn.Linear(64, 64)
-        self.requires_grad = requires_grad
-
-    def forward(self, env, allied_heroes, enemy_heroes, allied_nonheroes, enemy_nonheroes,
-                allied_towers, enemy_towers):
-        if allied_heroes.size(0) == 0:  # HACK: Dead hero.
-            allied_heroes = torch.zeros(1, 7)
-        inputs = torch.cat([env.view(-1), allied_heroes.view(-1)])
-        x = F.relu(self.affine1(inputs))
-        x = F.relu(self.affine2(x))
-        x = F.relu(self.affine3(x))
-        x = F.relu(self.affine4(x))
-        return x

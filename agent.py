@@ -288,6 +288,7 @@ class Player:
         self.validation = validation
 
         self.creeps_had_spawned = False
+        self.prev_level = 0
 
         use_synced_weights = use_latest_weights and not self.validation
 
@@ -499,7 +500,7 @@ class Player:
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
         handles = torch.full([max_units], -1)
-        m = torch.zeros(max_units, 10)
+        m = torch.zeros(max_units, 11)
         i = 0
         for unit in unit_list:
             if unit.is_alive:
@@ -536,7 +537,7 @@ class Player:
                 m[i] = (
                     # TODO(tzaman): Add rel_mana, norm_distance once it makes sense
                     torch.tensor([
-                        rel_hp, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
+                        rel_hp, rel_mana, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
                         in_attack_range, is_attacking_me, me_attacking_unit
                     ]))
 
@@ -560,10 +561,7 @@ class Player:
                 i += 1
         return m, handles
 
-    def select_action(self, world_state):
-        # Preprocess the state
-        hero_unit = get_unit(world_state, player_id=self.player_id)
-
+    def select_action(self, world_state, hero_unit):
         dota_time_norm = world_state.dota_time / 1200.  # Normalize by 20 minutes
         creepwave_sin = math.sin(world_state.dota_time * (2. * math.pi) / 60)
         team_float = -.2 if self.team_id == TEAM_DIRE else .2
@@ -664,10 +662,10 @@ class Player:
     def action_to_pb(self, action_dict, state, unit_handles):
         # TODO(tzaman): Recrease the scope of this function. Make it a converter only.
         hero_unit = get_unit(state, player_id=self.player_id)
-
         action_pb = CMsgBotWorldState.Action()
         action_pb.actionDelay = 0  # action_dict['delay'] * DELAY_ENUM_TO_STEP
         action_enum = action_dict['enum']
+
         if action_enum == 0:
             action_pb.actionType = CMsgBotWorldState.Action.Type.Value('DOTA_UNIT_ORDER_NONE')
         elif action_enum == 1:
@@ -689,13 +687,34 @@ class Player:
                 m.target = -1
             m.once = True
             action_pb.attackTarget.CopyFrom(m)
+        elif action_enum == 3:
+            action_pb = CMsgBotWorldState.Action()
+            action_pb.actionType = CMsgBotWorldState.Action.Type.Value('DOTA_UNIT_ORDER_CAST_NO_TARGET')
+            action_pb.cast.abilitySlot = action_dict['ability']
         else:
             raise ValueError("unknown action {}".format(action_enum))
+        action_pb.player = self.player_id
         return action_pb
 
-    def obs_to_action(self, obs):
+    def train_ability(self, hero_unit):
+        # Check if we leveled up
+        leveled_up = hero_unit.level > self.prev_level
+        if leveled_up:
+            self.prev_level = hero_unit.level
+            # Just try to level up the first ability.
+            action_pb = CMsgBotWorldState.Action()
+            action_pb.actionType = CMsgBotWorldState.Action.Type.Value('DOTA_UNIT_ORDER_TRAIN_ABILITY')
+            action_pb.player = self.player_id
+            action_pb.trainAbility.ability = "nevermore_shadowraze1"
+            return action_pb
+        return None
+
+    def obs_to_actions(self, obs):
+        actions = []
+        hero_unit = get_unit(state=obs, player_id=self.player_id)
+
         policy_input, action_dict, selected_heads_mask, unit_handles = self.select_action(
-            world_state=obs,
+            world_state=obs, hero_unit=hero_unit,
         )
 
         self.policy_inputs.append(policy_input)
@@ -704,8 +723,13 @@ class Player:
         logger.debug('action:\n' + pformat(action_dict))
 
         action_pb = self.action_to_pb(action_dict=action_dict, state=obs, unit_handles=unit_handles)
-        action_pb.player = self.player_id
-        return action_pb
+        actions.append(action_pb)
+
+        level_pb = self.train_ability(hero_unit)
+        if level_pb is not None:
+            actions.append(level_pb)
+
+        return actions
 
     def compute_reward(self, prev_obs, obs):
         # Draw.
@@ -815,8 +839,8 @@ class Game:
                     player.compute_reward(prev_obs=prev_obs[team_id], obs=obs)
                     reward_sum_step[team_id] += sum(player.rewards[-1].values())
                     with torch.no_grad():
-                        action_pb = player.obs_to_action(obs=obs)
-                    actions.append(action_pb)
+                        actions_player = player.obs_to_actions(obs=obs)
+                    actions.extend(actions_player)
 
                 actions_pb = CMsgBotWorldState.Actions(actions=actions)
                 actions_pb.dota_time = obs.dota_time
