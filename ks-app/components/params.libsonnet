@@ -6,7 +6,7 @@
     dotaservice: {
       agents: 32,
       dotaclient_image_tag: 'latest',
-      dotaservice_image_tag: '0.3.8',
+      dotaservice_image_tag: '0.3.9',
       entropy_coef: '6e-4',
       epochs: 1,
       expname: 'exp14',
