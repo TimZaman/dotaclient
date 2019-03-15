@@ -224,7 +224,7 @@ class DotaOptimizer:
         self.vf_coef = vf_coef
         self.run_local = run_local
 
-        self.iterations = 10000
+        self.iterations = 100000
         self.e_clip = 0.1
 
         self.running_mean = {int(team_id): None for team_id in [TEAM_RADIANT, TEAM_DIRE]}
@@ -249,13 +249,12 @@ class DotaOptimizer:
                 pretrained_model = latest_model
 
             # if we are not running locally, pull down model
-            if not self.run_local:
-                if pretrained_model is not None:
-                    logger.info('Downloading: {}'.format(pretrained_model))
-                    model_blob = self.bucket.get_blob(pretrained_model)
-                    # TODO(tzaman): Download to BytesIO and supply to torch in that way.
-                    pretrained_model = '/tmp/model.pt'
-                    model_blob.download_to_filename(pretrained_model)
+            if not self.run_local and pretrained_model is not None:
+                logger.info('Downloading: {}'.format(pretrained_model))
+                model_blob = self.bucket.get_blob(pretrained_model)
+                # TODO(tzaman): Download to BytesIO and supply to torch in that way.
+                pretrained_model = '/tmp/model.pt'
+                model_blob.download_to_filename(pretrained_model)
 
         if pretrained_model is not None:
             self.policy_base.load_state_dict(torch.load(pretrained_model), strict=False)
