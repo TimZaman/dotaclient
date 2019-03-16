@@ -500,7 +500,7 @@ class Player:
         # actions relating to output indices. Even if we would, batching multiple sequences together
         # would then be another error prone nightmare.
         handles = torch.full([max_units], -1)
-        m = torch.zeros(max_units, 11)
+        m = torch.zeros(max_units, 12)
         i = 0
         for unit in unit_list:
             if unit.is_alive:
@@ -534,11 +534,17 @@ class Player:
                 is_attacking_me = float(is_unit_attacking_unit(unit, hero_unit)) - 0.5
                 me_attacking_unit = float(is_unit_attacking_unit(hero_unit, unit)) - 0.5
 
+                in_ability_phase = -0.5
+                for a in unit.abilities:
+                    if a.is_in_ability_phase or a.is_channeling:
+                        in_ability_phase = 0.5
+                        break
+
                 m[i] = (
                     # TODO(tzaman): Add rel_mana, norm_distance once it makes sense
                     torch.tensor([
-                        rel_hp, rel_mana, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
-                        in_attack_range, is_attacking_me, me_attacking_unit
+                        rel_hp, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
+                        in_attack_range, is_attacking_me, me_attacking_unit, rel_mana, in_ability_phase
                     ]))
 
                 # Because we are currently only attacking, check if these units are valid

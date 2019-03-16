@@ -16,7 +16,7 @@ Surgery = namedtuple('Surgery', ['name', 'shape'])
 pretrained_model = 'exp15-job1-model_000001640.pt'
 output_name = 'patient.pt'
 procedures = [
-    Surgery(name='affine_unit_basic_stats.weight', shape=[128, 11]),
+    Surgery(name='affine_unit_basic_stats.weight', shape=[128, 12]),
     Surgery(name='affine_head_enum.weight', shape=[4, 256]),
     Surgery(name='affine_head_enum.bias', shape=[4]),
 ]

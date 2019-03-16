@@ -53,7 +53,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats = nn.Linear(11, 128)
+        self.affine_unit_basic_stats = nn.Linear(12, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -233,6 +233,20 @@ class Policy(nn.Module):
             return masks
 
         masks = {key: torch.ones(1, 1, val).byte() for key, val in cls.ACTION_OUTPUT_COUNTS.items()}
+        for ability in player_unit.abilities:
+            if ability.slot >= 3:
+                continue
+            # Note: `is_fully_castable` implies there is mana for it.
+            # Note: `is_in_ability_phase` means it is currently doing an ability.
+            if not ability.is_activated or ability.level == 0 or ability.cooldown_remaining > 0 \
+                or not ability.is_fully_castable:
+                # Can't use ability
+                masks['ability'][0, 0, ability.slot] = 0
+
+        if not masks['ability'].any():
+            # No abilities possible, so we cannot choose to use any abilities.
+            masks['enum'][0, 0, 3] = 0
+
         valid_units = unit_handles != -1
         valid_units[0] = 0 # The 'self' hero can never be targetted.
         if not valid_units.any():
