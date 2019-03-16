@@ -53,7 +53,7 @@ class Policy(nn.Module):
 
         self.affine_env = nn.Linear(3, 128)
 
-        self.affine_unit_basic_stats_v1 = nn.Linear(11, 128)
+        self.affine_unit_basic_stats = nn.Linear(11, 128)
 
         self.affine_unit_ah = nn.Linear(128, 128)
         self.affine_unit_eh = nn.Linear(128, 128)
@@ -66,7 +66,7 @@ class Policy(nn.Module):
         self.rnn = nn.GRU(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
 
         # Heads
-        self.affine_head_enum_v1 = nn.Linear(256, 4)
+        self.affine_head_enum = nn.Linear(256, 4)
         self.affine_move_x = nn.Linear(256, self.N_MOVE_ENUMS)
         self.affine_move_y = nn.Linear(256, self.N_MOVE_ENUMS)
         # self.affine_head_delay = nn.Linear(128, N_DELAY_ENUMS)
@@ -97,32 +97,32 @@ class Policy(nn.Module):
         env = F.relu(self.affine_env(env))  # (b, s, n)
 
         # Allied Heroes.
-        ah_basic = F.relu(self.affine_unit_basic_stats_v1(allied_heroes))
+        ah_basic = F.relu(self.affine_unit_basic_stats(allied_heroes))
         ah_embedding = self.affine_unit_ah(ah_basic)  # (b, s, units, n)
         ah_embedding_max, _ = torch.max(ah_embedding, dim=2)  # (b, s, n)
 
         # Enemy Heroes.
-        eh_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_heroes))
+        eh_basic = F.relu(self.affine_unit_basic_stats(enemy_heroes))
         eh_embedding = self.affine_unit_eh(eh_basic)  # (b, s, units, n)
         eh_embedding_max, _ = torch.max(eh_embedding, dim=2)  # (b, s, n)
 
         # Allied Non-Heroes.
-        anh_basic = F.relu(self.affine_unit_basic_stats_v1(allied_nonheroes))
+        anh_basic = F.relu(self.affine_unit_basic_stats(allied_nonheroes))
         anh_embedding = self.affine_unit_anh(anh_basic)  # (b, s, units, n)
         anh_embedding_max, _ = torch.max(anh_embedding, dim=2)  # (b, s, n)
 
         # Enemy Non-Heroes.
-        enh_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_nonheroes))
+        enh_basic = F.relu(self.affine_unit_basic_stats(enemy_nonheroes))
         enh_embedding = self.affine_unit_enh(enh_basic)  # (b, s, units, n)
         enh_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
 
         # Allied Towers.
-        ath_basic = F.relu(self.affine_unit_basic_stats_v1(allied_towers))
+        ath_basic = F.relu(self.affine_unit_basic_stats(allied_towers))
         ath_embedding = self.affine_unit_ath(ath_basic)  # (b, s, units, n)
         ath_embedding_max, _ = torch.max(ath_embedding, dim=2)  # (b, s, n)
 
         # Enemy Towers.
-        eth_basic = F.relu(self.affine_unit_basic_stats_v1(enemy_towers))
+        eth_basic = F.relu(self.affine_unit_basic_stats(enemy_towers))
         eth_embedding = self.affine_unit_eth(eth_basic)  # (b, s, units, n)
         eth_embedding_max, _ = torch.max(enh_embedding, dim=2)  # (b, s, n)
 
@@ -147,7 +147,7 @@ class Policy(nn.Module):
         # Heads.
         action_scores_x = self.affine_move_x(x)
         action_scores_y = self.affine_move_y(x)
-        action_scores_enum = self.affine_head_enum_v1(x)
+        action_scores_enum = self.affine_head_enum(x)
         # action_delay_enum = self.affine_head_delay(x)
         action_target_unit = torch.matmul(unit_attention, unit_embedding)   # (b, s, 1, n) * (b, s, n, units) = (b, s, 1, units)
         action_target_unit = action_target_unit.squeeze(2)  # (b, s, 1, units) -> (b, s, units)
