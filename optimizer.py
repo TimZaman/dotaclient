@@ -239,10 +239,12 @@ class DotaOptimizer:
             # If there's a model in here, we resume from there
             if latest_model is not None:
                 logger.info('Found a latest model in pretrained dir: {}'.format(latest_model))
-                self.iteration_start = self.iteration_from_model_filename(filename=latest_model) + 1
                 if pretrained_model is not None:
                     logger.warning('Overriding pretrained model by latest model.')
                 pretrained_model = latest_model
+
+            if pretrained_model is not None:
+                self.iteration_start = self.iteration_from_model_filename(filename=pretrained_model) + 1
 
             # if we are not running locally, pull down model
             if not self.run_local and pretrained_model is not None:
@@ -253,7 +255,9 @@ class DotaOptimizer:
                 model_blob.download_to_filename(pretrained_model)
 
         if pretrained_model is not None:
-            self.policy_base.load_state_dict(torch.load(pretrained_model), strict=False)
+            self.policy_base.load_state_dict(torch.load(pretrained_model,
+                                                        map_location=lambda storage, loc: storage),
+                                            strict=False)
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             self.policy = DistributedDataParallelSparseParamCPU(self.policy_base)
@@ -263,7 +267,6 @@ class DotaOptimizer:
         self.policy.to(device)
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
-        self.time_last_step = time.time()
 
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
                                prefetch_count=mq_prefetch_count,
@@ -326,8 +329,6 @@ class DotaOptimizer:
         rollout_len = data['rewards'].shape[0]
         logger.debug('rollout_len={}'.format(rollout_len))
 
-        start = time.time()
-
         sequences = []
         hidden = self.policy.init_hidden().to(device)
         values = []
@@ -378,7 +379,6 @@ class DotaOptimizer:
 
             log_probs_sel = {}
             for key in head_logits_dict:
-                # TODO(tzaman): USE FOR PPO
                 log_probs = Policy.masked_softmax(logits=head_logits_dict[key], mask=s_masks[key].unsqueeze(0))
                 log_probs_sel[key] = torch.masked_select(input=log_probs, mask=s_actions[key]).detach()
 
@@ -429,6 +429,7 @@ class DotaOptimizer:
     def run(self):
         for it in range(self.iteration_start, self.iterations):
             logger.info('iteration {}/{}'.format(it, self.iterations))
+            start_step = time.time()
 
             # First grab a bunch of experiences
             experiences = []
@@ -436,6 +437,7 @@ class DotaOptimizer:
             rollout_lens = []
             weight_ages = []
             canvas = None  # Just save only the last canvas.
+            start_xp = time.time()
             while len(experiences) < self.min_seq_per_epoch:
                 logger.debug(' adding experience @{}/{}'.format(len(experiences), self.min_seq_per_epoch))
 
@@ -449,10 +451,12 @@ class DotaOptimizer:
                 subrewards.append(rollout_subrewards)
                 rollout_lens.append(rollout_len)
                 weight_ages.append(it - weight_version)
+            time_xp = time.time() - start_xp
 
             losses = []
             entropies = []
             grad_norms = []
+            start_optimizing = time.time()
             for ep in range(self.epochs):
                 logger.info(' epoch {}/{}'.format(ep + 1, self.epochs))
                 self.mq.process_data_events()
@@ -460,6 +464,7 @@ class DotaOptimizer:
                 losses.append(loss_d)
                 entropies.append(entropy_d)
                 grad_norms.append(grad_norm_d)
+            time_optimizing = time.time() - start_optimizing
 
             losses = self.list_of_dicts_to_dict_of_lists(losses)
             loss = losses['loss'].mean()
@@ -470,8 +475,6 @@ class DotaOptimizer:
             grad_norms = self.list_of_dicts_to_dict_of_lists(grad_norms)
 
             n_steps = len(experiences) * self.seq_len
-            steps_per_s = n_steps / (time.time() - self.time_last_step)
-            self.time_last_step = time.time()
 
             subrewards_per_sec = np.stack(subrewards) / n_steps * Policy.OBSERVATIONS_PER_SECOND
             rollout_rewards = subrewards_per_sec.sum(axis=1)
@@ -483,6 +486,9 @@ class DotaOptimizer:
 
             weight_ages = torch.tensor(weight_ages, dtype=torch.float32)
             avg_weight_age = weight_ages.mean()
+
+            time_step = time.time() - start_step
+            steps_per_s = n_steps / (time_step)
 
             metrics = {
                 self.SPEED_KEY: steps_per_s,
@@ -509,6 +515,7 @@ class DotaOptimizer:
                 steps_per_s, float(avg_weight_age), reward_per_sec, float(loss), float(entropy)))
 
             if self.checkpoint:
+                start_checkpoint = time.time()
                 # TODO(tzaman): re-introduce distributed metrics. See commits from december 2017.
 
                 # Write metrics to events file.
@@ -540,8 +547,13 @@ class DotaOptimizer:
                 if not self.run_local:
                     blob = self.bucket.blob(self.events_filename)
                     blob.upload_from_filename(filename=self.events_filename)
-
+                time_checkpoint = time.time() - start_checkpoint
+                start_model_upload = time.time()
                 self.upload_model(version=it)
+                time_model_upload = time.time() - start_model_upload
+
+                logger.info('Timings: total={:.2f}, upload_tb={:.2f}, upload_model={:.2f}, xp={:.2f}'.format(
+                    time_step, time_checkpoint, time_model_upload, time_xp))
 
     def train(self, experiences):
         # Train on one epoch of data.
