@@ -541,7 +541,6 @@ class Player:
                         break
 
                 m[i] = (
-                    # TODO(tzaman): Add rel_mana, norm_distance once it makes sense
                     torch.tensor([
                         rel_hp, loc_x, loc_y, loc_z, norm_distance, facing_sin, facing_cos,
                         in_attack_range, is_attacking_me, me_attacking_unit, rel_mana, in_ability_phase
@@ -918,7 +917,7 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
         game_id = str(datetime.now().strftime('%b%d_%H-%M-%S'))
 
         if validation:
-            config = get_1v1_bot_vs_default_config()
+            config = get_1v1_bot_vs_default_config(validation_team=validation)
         else:
             config = get_1v1_selfplay_config()
 
@@ -931,10 +930,12 @@ async def main(rmq_host, rmq_port, rollout_size, max_dota_time, latest_weights_p
     channel_dota.close()
 
 
-def get_1v1_bot_vs_default_config():
+def get_1v1_bot_vs_default_config(validation_team):
     # Randomize the mode between dire and radiant players.
-    modes = [HERO_CONTROL_MODE_DEFAULT, HERO_CONTROL_MODE_CONTROLLED]
-    random.shuffle(modes)
+    if validation_team == 'RADIANT':
+        modes = [HERO_CONTROL_MODE_CONTROLLED, HERO_CONTROL_MODE_DEFAULT]
+    else:
+        modes = [HERO_CONTROL_MODE_DEFAULT, HERO_CONTROL_MODE_CONTROLLED]
     hero_picks = [
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_NEVERMORE, control_mode=modes[0]),
         HeroPick(team_id=TEAM_RADIANT, hero_id=NPC_DOTA_HERO_SNIPER, control_mode=HERO_CONTROL_MODE_IDLE),
@@ -989,7 +990,8 @@ if __name__ == '__main__':
     parser.add_argument("--model", type=str, help="Initial model to immediatelly start")
     parser.add_argument("--use-latest-weights-prob", type=float,
                         help="Probability of using the latest weights. Otherwise some old one is chosen if available.", default=1.0)
-    parser.add_argument("--validation", type=bool, help="Function as validation runner", default=False)
+    parser.add_argument("--validation", help="Function as validation runner.",
+                        choices=['', 'DIRE', 'RADIANT'], default='')
     parser.add_argument("--log-dir", type=str, help="Logging directory", default='')
     args = parser.parse_args()
 

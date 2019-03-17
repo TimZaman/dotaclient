@@ -1,26 +1,28 @@
 local params = std.extVar("__ksonnet/params").components["dotaservice"];
-{
+
+
+local worker(team) = {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
     "metadata": {
         "labels": {
-            "app": "agent-val",
+            "app": "agent-val-" + team,
             "job": params.jobname,
         },
-        "name": params.jobname + "-agent-val"
+        "name": params.jobname + "-agent-val-" + team
     },
     "spec": {
         "replicas": 1,
         "selector": {
             "matchLabels": {
-                "app": "agent-val",
+                "app": "agent-val-" + team,
                 "job": params.jobname
             }
         },
         "template": {
             "metadata": {
                 "labels": {
-                    "app": "agent-val",
+                    "app": "agent-val-" + team,
                     "job": params.jobname,
                 }
             },
@@ -33,9 +35,9 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
                             "--max-dota-time",
                             std.toString(params.max_dota_time),
                             "--validation",
-                            "1",
+                            team,
                             "--log-dir",
-                            std.toString(params.expname) + "/" + std.toString(params.jobname) + "/val"
+                            std.toString(params.expname) + "/" + std.toString(params.jobname) + "/val-" + team
                         ],
                         "command": [
                             "python3.7",
@@ -119,4 +121,6 @@ local params = std.extVar("__ksonnet/params").components["dotaservice"];
             }
         }
     }
-}
+};
+
+[worker('DIRE'), worker('RADIANT')]
