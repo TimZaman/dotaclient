@@ -231,7 +231,10 @@ class DotaOptimizer:
         if self.checkpoint:
             self.writer = None
             logger.info('Checkpointing to: {}'.format(self.log_dir))
-            os.mkdir(self.log_dir)
+            try:
+                os.mkdir(self.log_dir)
+            except:
+                pass
             # if we are not running locally, set bucket
             if not self.run_local:
                 client = storage.Client()
