@@ -267,6 +267,7 @@ class DotaOptimizer:
         self.policy.to(device)
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
+        self.time_last_it = time.time()
 
         self.mq = MessageQueue(host=self.rmq_host, port=self.rmq_port,
                                prefetch_count=mq_prefetch_count,
@@ -429,7 +430,6 @@ class DotaOptimizer:
     def run(self):
         for it in range(self.iteration_start, self.iterations):
             logger.info('iteration {}/{}'.format(it, self.iterations))
-            start_step = time.time()
 
             # First grab a bunch of experiences
             experiences = []
@@ -438,12 +438,15 @@ class DotaOptimizer:
             weight_ages = []
             canvas = None  # Just save only the last canvas.
             start_xp = time.time()
+            xp_waits = 0
             while len(experiences) < self.min_seq_per_epoch:
                 logger.debug(' adding experience @{}/{}'.format(len(experiences), self.min_seq_per_epoch))
 
                 # Get new experiences from a new rollout.
                 with torch.no_grad():
+                    start_xp_wait = time.time()
                     rollout, rollout_subrewards, rollout_len, weight_version, canvas = self.get_rollout()
+                    xp_waits += time.time() - start_xp_wait
                     rollout_experiences = self.experiences_from_rollout(data=rollout)
 
                 experiences.extend(rollout_experiences)
@@ -487,8 +490,10 @@ class DotaOptimizer:
             weight_ages = torch.tensor(weight_ages, dtype=torch.float32)
             avg_weight_age = weight_ages.mean()
 
-            time_step = time.time() - start_step
-            steps_per_s = n_steps / (time_step)
+
+            time_it = time.time() - self.time_last_it
+            steps_per_s = n_steps / (time_it)
+            self.time_last_it = time.time()
 
             metrics = {
                 self.SPEED_KEY: steps_per_s,
@@ -501,6 +506,11 @@ class DotaOptimizer:
                 'avg_rollout_len': avg_rollout_len,
                 'avg_weight_age': avg_weight_age,
             }
+
+            metrics['timing/it'] = time_it  # Full total time since last step
+            metrics['timing/xp_total'] = time_xp
+            metrics['timing/xp_mq_wait'] = xp_waits
+            metrics['timing/optimizer'] = time_optimizing
 
             for k, v in entropies.items():
                 metrics['entropy/{}'.format(k)] = v.mean()
@@ -521,7 +531,9 @@ class DotaOptimizer:
                 # Write metrics to events file.
                 for name, metric in metrics.items():
                     self.writer.add_scalar(name, metric, it)
-                
+
+                # TODO(tzaman): How to add the time spent on writing events file and model?
+
                 # Add per-iteration histograms
                 self.writer.add_histogram('losses', losses['loss'], it)
                 # self.writer.add_histogram('entropies', entropies, it)
@@ -552,8 +564,8 @@ class DotaOptimizer:
                 self.upload_model(version=it)
                 time_model_upload = time.time() - start_model_upload
 
-                logger.info('Timings: total={:.2f}, upload_tb={:.2f}, upload_model={:.2f}, xp={:.2f}'.format(
-                    time_step, time_checkpoint, time_model_upload, time_xp))
+                logger.info('Timings: it={:.2f}, xp={:.2f}, xp_wait={:.2f} opt={:.2f}, upload_tb={:.2f}, upload_model={:.2f}'.format(
+                    time_it, time_xp, xp_waits, time_optimizing, time_checkpoint, time_model_upload))
 
     def train(self, experiences):
         # Train on one epoch of data.
