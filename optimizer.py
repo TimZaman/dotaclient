@@ -200,7 +200,6 @@ class DotaOptimizer:
 
     MODEL_FILENAME_FMT = "model_%09d.pt"
     BUCKET_NAME = 'dotaservice'
-    RUNNING_NORM_FACTOR = 0.99  # Updates with every received rollout.
     MODEL_HISTOGRAM_FREQ = 128
     MAX_GRAD_NORM = 0.5
     SPEED_KEY = 'steps per s'
@@ -226,9 +225,6 @@ class DotaOptimizer:
 
         self.iterations = 100000
         self.e_clip = 0.1
-
-        self.running_mean = {int(team_id): None for team_id in [TEAM_RADIANT, TEAM_DIRE]}
-        self.running_std = {int(team_id): None for team_id in [TEAM_RADIANT, TEAM_DIRE]}
 
         if self.checkpoint:
             self.writer = SummaryWriter(log_dir=self.log_dir)
@@ -318,16 +314,6 @@ class DotaOptimizer:
         subrewards = data['rewards'].sum(axis=0)
 
         return data, subrewards, rollout_len, version, canvas
-
-    def update_running_mean_std(self, x, team_id):
-        mean_reward = x.mean()
-        mean_std = x.std()
-        if self.running_mean[team_id] is None:  #  First ever step
-            self.running_mean[team_id] = mean_reward
-            self.running_std[team_id] = mean_std
-        else:
-            self.running_mean[team_id] = self.running_mean[team_id] * self.RUNNING_NORM_FACTOR + mean_reward * (1 - self.RUNNING_NORM_FACTOR)
-            self.running_std[team_id] = self.running_std[team_id] * self.RUNNING_NORM_FACTOR + mean_std * (1 - self.RUNNING_NORM_FACTOR)
 
     def experiences_from_rollout(self, data):
         # TODO(tzaman): The rollout can consist out of multiple viable sequences.
@@ -509,14 +495,6 @@ class DotaOptimizer:
                 'avg_rollout_len': avg_rollout_len,
                 'avg_weight_age': avg_weight_age,
             }
-
-            for team_id in self.running_mean:
-                if self.running_mean[team_id] is not None:
-                    metrics['rewards/running_mean_{}'.format(team_id)] = self.running_mean[team_id]
-
-            for team_id in self.running_std:
-                if self.running_std[team_id] is not None:
-                    metrics['rewards/running_std_{}'.format(team_id)] = self.running_std[team_id]
 
             for k, v in entropies.items():
                 metrics['entropy/{}'.format(k)] = v.mean()
