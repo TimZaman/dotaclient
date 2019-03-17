@@ -35,7 +35,7 @@ local worker(team) = {
                             "--max-dota-time",
                             std.toString(params.max_dota_time),
                             "--validation",
-                            team,
+                            std.asciiUpper(team),
                             "--log-dir",
                             std.toString(params.expname) + "/" + std.toString(params.jobname) + "/val-" + team
                         ],
@@ -123,4 +123,4 @@ local worker(team) = {
     }
 };
 
-[worker('DIRE'), worker('RADIANT')]
+[worker('dire'), worker('radiant')]
