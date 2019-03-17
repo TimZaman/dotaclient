@@ -224,11 +224,14 @@ class DotaOptimizer:
         self.run_local = run_local
 
         self.iterations = 100000
+        self.model_upload_freq = 10
+        self.eventfile_refresh_freq = 100
         self.e_clip = 0.1
 
         if self.checkpoint:
-            self.writer = SummaryWriter(log_dir=self.log_dir)
+            self.writer = None
             logger.info('Checkpointing to: {}'.format(self.log_dir))
+            os.mkdir(self.log_dir)
             # if we are not running locally, set bucket
             if not self.run_local:
                 client = storage.Client()
@@ -256,7 +259,7 @@ class DotaOptimizer:
 
         if pretrained_model is not None:
             self.policy_base.load_state_dict(torch.load(pretrained_model,
-                                                        map_location=lambda storage, loc: storage),
+                                                        map_location=torch.device(device)),
                                             strict=False)
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -528,6 +531,10 @@ class DotaOptimizer:
                 start_checkpoint = time.time()
                 # TODO(tzaman): re-introduce distributed metrics. See commits from december 2017.
 
+                if self.writer is None or it % self.eventfile_refresh_freq == 0:
+                    logger.info('(Re-)Creating TensorBoard eventsfile (#iteration={})'.format(it))
+                    self.writer = SummaryWriter(log_dir=self.log_dir)
+
                 # Write metrics to events file.
                 for name, metric in metrics.items():
                     self.writer.add_scalar(name, metric, it)
@@ -560,6 +567,7 @@ class DotaOptimizer:
                     blob = self.bucket.blob(self.events_filename)
                     blob.upload_from_filename(filename=self.events_filename)
                 time_checkpoint = time.time() - start_checkpoint
+
                 start_model_upload = time.time()
                 self.upload_model(version=it)
                 time_model_upload = time.time() - start_model_upload
@@ -705,9 +713,11 @@ class DotaOptimizer:
         self.mq.publish_model(msg=state_dict_b, hdr={'version': version})
 
         # Upload to GCP.
-        if not self.run_local:
-            blob = self.bucket.blob(rel_path)
-            blob.upload_from_string(data=state_dict_b)  # Model
+        if version % self.model_upload_freq == 0:
+            logger.info('Uploading model {} to GCP'.format(version))
+            if not self.run_local:
+                blob = self.bucket.blob(rel_path)
+                blob.upload_from_string(data=state_dict_b)  # Model
 
 
 def init_distribution(backend='gloo'):
