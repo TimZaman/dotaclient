@@ -223,6 +223,11 @@ class Policy(nn.Module):
             masks[key] = fn(1, 1, val).byte()
         return masks
 
+    @staticmethod
+    def ability_available(ability):
+        return ability.is_activated and ability.level > 0 and ability.cooldown_remaining == 0 \
+                and ability.is_fully_castable
+
     @classmethod
     def action_masks(cls, player_unit, unit_handles):
         """Mask the head with possible actions."""
@@ -238,8 +243,7 @@ class Policy(nn.Module):
                 continue
             # Note: `is_fully_castable` implies there is mana for it.
             # Note: `is_in_ability_phase` means it is currently doing an ability.
-            if not ability.is_activated or ability.level == 0 or ability.cooldown_remaining > 0 \
-                or not ability.is_fully_castable:
+            if not cls.ability_available(ability):
                 # Can't use ability
                 masks['ability'][0, 0, ability.slot] = 0
 
