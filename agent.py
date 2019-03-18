@@ -443,7 +443,7 @@ class Player:
             await self.rollout()
 
     async def rollout(self):
-        logger.info('Player {} rollout, len='.format(self.player_id, self.steps_queued))
+        logger.info('Player {} rollout, len={}'.format(self.player_id, self.steps_queued))
 
         if not self.rewards:
             logger.info('nothing to roll out.')
