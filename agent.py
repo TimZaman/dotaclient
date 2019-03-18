@@ -41,6 +41,8 @@ import pika # TODO(tzaman): remove in favour of aioamqp
 from policy import Policy
 from policy import REWARD_KEYS
 
+torch.set_grad_enabled(False)
+
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -188,7 +190,7 @@ class WeightStore:
         model_blob = bucket.get_blob(model)
         tmp_model = '/tmp/model.pt'
         model_blob.download_to_filename(tmp_model)
-        state_dict = torch.load(tmp_model, map_location=lambda storage, loc: storage)
+        state_dict = torch.load(tmp_model, map_location=torch.device('cpu'))
         self.add(version=-1, state_dict=state_dict)
         self.ready.set()
 
@@ -199,7 +201,7 @@ async def model_callback(channel, body, envelope, properties):
     # TODO(tzaman): add a future so we can wait for first weights
     version = properties.headers['version']
     logger.info("Received new model: version={}, size={}b".format(version, len(body)))
-    state_dict = torch.load(io.BytesIO(body), map_location=lambda storage, loc: storage)
+    state_dict = torch.load(io.BytesIO(body), map_location=torch.device('cpu'))
     weight_store.add(version=version, state_dict=state_dict)
     weight_store.ready.set()
 
@@ -867,6 +869,11 @@ class Game:
             if done:
                 break
 
+        if end_state in [Status.Value('RESOURCE_EXHAUSTED'), Status.Value('FAILED_PRECONDITION'),
+                         Status.Value('OUT_OF_RANGE')]:
+            # Bad end state. We don't want to roll this one out.
+            logger.warning('Bad end state ({})! not rollout out game.'.format(end_state))
+            return
         # drawing.save(stem=game_id)  # HACK
 
         # Finish (e.g. final rollout or send validation metrics).
