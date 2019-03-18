@@ -17,7 +17,7 @@ eps = np.finfo(np.float32).eps.item()
 TICKS_PER_OBSERVATION = 15 # HACK!
 # N_DELAY_ENUMS = 5  # HACK!
 
-REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'tower_hp']
+REWARD_KEYS = ['enemy', 'win', 'xp', 'hp', 'kills', 'death', 'lh', 'denies', 'tower_hp', 'mana']
 
 
 class MaskedCategorical():

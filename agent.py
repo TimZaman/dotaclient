@@ -133,14 +133,21 @@ def get_reward(prev_obs, obs, player_id):
     # XP Reward
     xp_init = get_total_xp(level=unit_init.level, xp_needed_to_level=unit_init.xp_needed_to_level)
     xp = get_total_xp(level=unit.level, xp_needed_to_level=unit.xp_needed_to_level)
-    reward['xp'] = (xp - xp_init) * 0.001  # One creep is around 40 xp.
+    reward['xp'] = (xp - xp_init) * 0.001  # One creep is around 40 xp; 40*0.001=0.04
 
     # HP and death reward
     if unit_init.is_alive and unit.is_alive:
-        hp_rel_init = unit_init.health / unit_init.health_max
         hp_rel = unit.health / unit.health_max
-        low_hp_factor = 1. + (1 - hp_rel)**2  # hp_rel=0 -> 2; hp_rel=0.5->1.25; hp_rel=1 -> 1.
+        low_hp_factor = 1. + (1 - hp_rel)**2  # rel=0 -> 3; rel=0 -> 2; rel=0.5->1.25; rel=1 -> 1.
+        hp_rel_init = unit_init.health / unit_init.health_max
         reward['hp'] = (hp_rel - hp_rel_init) * low_hp_factor * 0.2
+        # NOTE: Fully depleting hp costs: (0 - 1) * (1+(1-0)^2) * 0.2 = - 0.4
+
+        mana_rel = unit.mana / unit.mana_max
+        low_mana_factor = 1. + (1 - mana_rel)**2  # rel=0 -> 3; rel=0 -> 2; rel=0.5->1.25; rel=1 -> 1.
+        mana_rel_init = unit_init.mana / unit_init.mana_max
+        reward['mana'] = (mana_rel - mana_rel_init) * low_mana_factor * 0.1
+        # NOTE: Fully depleting mana costs: (0 - 1) * (1+(1-0)^2) * 0.1 = - 0.2
 
     # Kill and death rewards
     reward['kills'] = (player.kills - player_init.kills) * 0.4
