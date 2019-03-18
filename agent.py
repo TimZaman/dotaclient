@@ -443,7 +443,7 @@ class Player:
             await self.rollout()
 
     async def rollout(self):
-        logger.info('Player {} rollout.'.format(self.player_id))
+        logger.info('Player {} rollout, len='.format(self.player_id, self.steps_queued))
 
         if not self.rewards:
             logger.info('nothing to roll out.')
@@ -879,7 +879,7 @@ class Game:
         if end_state in [Status.Value('RESOURCE_EXHAUSTED'), Status.Value('FAILED_PRECONDITION'),
                          Status.Value('OUT_OF_RANGE')]:
             # Bad end state. We don't want to roll this one out.
-            logger.warning('Bad end state ({})! not rollout out game.'.format(end_state))
+            logger.warning('Bad end state ({})! not rolling out game.'.format(end_state))
             return
         # drawing.save(stem=game_id)  # HACK
 
