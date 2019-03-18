@@ -879,7 +879,8 @@ class Game:
         if end_state in [Status.Value('RESOURCE_EXHAUSTED'), Status.Value('FAILED_PRECONDITION'),
                          Status.Value('OUT_OF_RANGE')]:
             # Bad end state. We don't want to roll this one out.
-            logger.warning('Bad end state ({})! not rolling out game.'.format(end_state))
+            logger.warning('Bad end state `{}`, not rolling out game (dota_time={})'.format(
+                end_state, dota_time))
             return
         # drawing.save(stem=game_id)  # HACK
 
